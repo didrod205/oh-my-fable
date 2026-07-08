@@ -82,7 +82,13 @@ checks the result against the goal and routes:
 | `blocked` | same obstacle keeps recurring | replan around it / escalate |
 | `goal_met` | success criteria satisfied | stop (even with steps left — no busywork) |
 
-And replanning **accumulates**: finished steps are preserved verbatim; only the
+And it works in both directions: stopping early when the goal is met, **and
+refusing to stop when it isn't** — when the plan runs out of steps but the
+goal has `successCriteria`, a final **exit check** verifies them against the
+recorded evidence and sends the run back to work if something is missing.
+Plan exhaustion and goal completion are different events.
+
+Replanning **accumulates**: finished steps are preserved verbatim; only the
 remaining work is regenerated. Long tasks move forward instead of restarting.
 
 ### 3. It's deterministically testable (genuinely rare for an agent framework)
@@ -133,13 +139,18 @@ OpenAI, Ollama, LM Studio, OpenRouter, Groq… — `ollama("llama3.1")` for a lo
 model with no key), both over `fetch`, no SDK. Or bring any model by implementing
 the `Provider` interface (three methods).
 
-`AnthropicProvider` works with the current flagship models (`claude-opus-4-8`,
-`claude-fable-5`) out of the box — it drops the `temperature` parameter they
-reject — and **prompt-caches the system+tools prefix by default**, so a long
-durable run pays ~10× less on the context it replays every step. Opt into
-`{ thinking: "adaptive", effort: "high" }` for harder planning. The `claude`
-provider can return real `--output-format json` cost/usage and run Claude's own
-tools (`{ tools: true, permissionMode: "acceptEdits" }`).
+`AnthropicProvider` defaults to `claude-sonnet-5` and works with every current
+flagship model (`claude-opus-4-8`, `claude-fable-5`) out of the box — it drops
+the `temperature` parameter they reject, routes safety refusals to the
+reflector instead of recording them as success, and on Fable-tier models opts
+into the **server-side refusal fallback** (a classifier false-positive is
+re-served by `claude-opus-4-8` instead of failing the step). It
+**prompt-caches both the system+tools prefix and the replayed history** by
+default, so a long durable run re-reads its context at ~0.1× instead of full
+price every step. Opt into `{ thinking: "adaptive", effort: "high" }` for
+harder planning. The `claude` provider can return real `--output-format json`
+cost/usage and run Claude's own tools
+(`{ tools: true, permissionMode: "acceptEdits" }`).
 
 ## Or use it from the terminal
 
@@ -215,7 +226,7 @@ what to do about it.
 await run(goal, {
   provider,
   onEvent: (e) => console.log(e.type, e),
-  // plan_created · step_start · step_done · reflection · replan · compaction · checkpoint · done · halted
+  // plan_created · step_start · step_done · reflection · replan · compaction · checkpoint · exit_check · done · halted
 });
 ```
 
@@ -228,8 +239,8 @@ caps — exceed any and it halts cleanly, preserving all work:
 await run(goal, {
   provider,
   maxSteps: 50,            // total step budget
-  maxTokens: 2_000_000,    // cumulative token budget
-  maxWallClockMs: 1_800_000,
+  maxTokens: 2_000_000,    // cumulative token budget — EVERY model call counts (planning, reflection, compaction, repair)
+  maxWallClockMs: 1_800_000, // ACTIVE runtime only — downtime between crash and resume never counts
   maxStepAttempts: 3,      // a single step retried this many times → blocked
   maxReplans: 12,          // replan storm → halted
 });
@@ -240,14 +251,16 @@ await run(goal, {
 A `planner ↔ executor ↔ reflector` loop over a serializable `RunContext`:
 
 ```
-plan → [ budget? → next step → compact? → execute → reflect → checkpoint → route ] → done
+plan → [ budget? → next step → compact? → execute → reflect → checkpoint → route ] → exit check → done
 ```
 
-- **planner** — goal → ordered steps; `replan` accumulates instead of resetting.
+- **planner** — goal → ordered steps, grounded in the tools the executor
+  actually has; `replan` accumulates instead of resetting.
 - **executor** — runs one step, including a provider-agnostic tool mini-loop.
 - **reflector** — heuristics first (cheap, certain), then the model, with JSON
   self-repair and a conservative fallback (a wrong early exit is worse than one
-  more loop).
+  more loop). When the plan runs out of steps, it runs the final **exit check**
+  against the success criteria — plan exhaustion is not goal completion.
 - **contextManager** — folds old turns into digests so long runs stay inside the
   window; the plan is never compacted.
 - **store / budget** — checkpoint after every step; guard against runaways.

@@ -26,7 +26,7 @@ interface OAIResponse {
   error?: { message?: string };
 }
 
-const FINISH: Record<string, StopReason> = { stop: "end", tool_calls: "tool_use", function_call: "tool_use", length: "max_tokens" };
+const FINISH: Record<string, StopReason> = { stop: "end", tool_calls: "tool_use", function_call: "tool_use", length: "max_tokens", content_filter: "refusal" };
 
 /**
  * Talks the OpenAI Chat Completions format — which means it works with almost

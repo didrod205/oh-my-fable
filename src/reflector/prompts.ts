@@ -1,4 +1,4 @@
-import type { Plan, Observation, Goal, Step, Message } from "../core/types.js";
+import type { Plan, Observation, Goal, Step, Message, RunContext } from "../core/types.js";
 
 const REFLECT_SYSTEM = `You are the progress supervisor of an autonomous agent. You just saw the result of one step. Judge what should happen next — pick exactly ONE:
 
@@ -26,6 +26,7 @@ export function reflectPrompt(plan: Plan, obs: Observation, goal: Goal, step: St
       role: "user",
       content: [
         `Goal: ${goal.description}`,
+        goal.constraints?.length ? `Constraints (must not be violated): ${goal.constraints.join("; ")}` : "",
         goal.successCriteria?.length ? `Done when: ${goal.successCriteria.join("; ")}` : "",
         "",
         "Current plan:",
@@ -34,6 +35,41 @@ export function reflectPrompt(plan: Plan, obs: Observation, goal: Goal, step: St
         `Step just run: ${step ? step.intent : obs.stepId}`,
         `Succeeded: ${obs.ok}`,
         `Result: ${obs.error ? `ERROR — ${obs.error}` : obs.output}`,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    },
+  ];
+}
+
+const VERIFY_SYSTEM = `You are the final completion check of an autonomous agent. Every planned step has finished. Judge STRICTLY whether the goal's success criteria are ALL satisfied by the evidence below.
+
+- Judge only from the recorded evidence. If a criterion is not clearly satisfied by it, the criterion is NOT met.
+- goal_met      — every success criterion is satisfied.
+- needs_replan  — something is still missing; say exactly what, so the next plan can close the gap.
+
+Respond with ONLY this JSON. No prose, no code fences:
+{ "progress": "goal_met" | "needs_replan", "notes": "what is missing (or why it is complete)", "confidence": 0.0 }`;
+
+export function verifyPrompt(ctx: RunContext): Message[] {
+  const goal = ctx.goal;
+  const done = ctx.plan.steps.filter((s) => s.status === "done");
+  const failed = ctx.plan.steps.filter((s) => s.status === "failed");
+  return [
+    { role: "system", content: VERIFY_SYSTEM },
+    {
+      role: "user",
+      content: [
+        `Goal: ${goal.description}`,
+        goal.constraints?.length ? `Constraints: ${goal.constraints.join("; ")}` : "",
+        `Success criteria: ${(goal.successCriteria ?? []).join("; ")}`,
+        "",
+        ctx.digests.length ? `Summary of earlier work:\n${ctx.digests.map((d) => `  ${d.summary}`).join("\n")}` : "",
+        "Completed steps and their recorded results:",
+        done.length ? done.map((s) => `  ✓ ${s.intent}${s.result ? ` → ${s.result}` : ""}`).join("\n") : "  (none)",
+        failed.length ? `Failed steps:\n${failed.map((s) => `  ✗ ${s.intent}`).join("\n")}` : "",
+        "",
+        "Are the success criteria ALL met?",
       ]
         .filter(Boolean)
         .join("\n"),

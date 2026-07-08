@@ -4,6 +4,65 @@ All notable changes to oh-my-fable are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-07-08
+
+The "does it actually think the way it claims to?" release: an outside review of
+the harness against the mindset it encodes found two places where the loop's own
+principles were only half-implemented, plus real money left on the table. All
+fixed, with tests.
+
+### Fixed
+
+- **Plan exhaustion ≠ goal completion — now enforced, not just documented.**
+  Previously, running out of steps returned `done` without ever checking the
+  success criteria. Now, when the plan is exhausted and the goal has
+  `successCriteria`, the reflector runs a final **exit check** against the
+  recorded evidence; if the criteria aren't met, the run replans and keeps
+  working (bounded by `maxReplans`). New `exit_check` event. Goals without
+  criteria behave exactly as before.
+- **A blocked plan is no longer a false "done".** If pending steps can never run
+  (their dependencies failed or don't exist), the loop used to report
+  "all steps complete". It now replans around the stranded steps.
+- **A crash is a pause — including for the wall-clock budget.** Downtime between
+  a crash and its `resume()` no longer counts against `maxWallClockMs`; the
+  budget now measures *active* runtime only (`BudgetState.elapsedMs`, folded at
+  every checkpoint). Previously, resuming after an outage longer than the budget
+  halted instantly.
+- **`AnthropicProvider` no longer sends `temperature` to Claude Sonnet 5**
+  (which rejects non-default sampling params — previously HTTP 400), and no
+  longer records a safety refusal or a context-window overflow as a successful
+  step: `refusal` is a first-class `StopReason` the reflector can route on
+  (OpenAI-compat maps `content_filter` the same way).
+
+### Added
+
+- **The replayed history is now actually prompt-cached.** The executor sends
+  stable content first (system → append-only history) and volatile content last
+  (plan state + current step), and flags the last history message as a cache
+  breakpoint via the new `Message.cache` hint — `AnthropicProvider` turns it
+  into `cache_control`. Long runs re-read their history at ~0.1× instead of
+  full price every step; other providers ignore the hint.
+- **Refusal fallback on Fable-tier models by default.** On `claude-fable-5` /
+  `claude-mythos-5`, the provider opts into the server-side fallback beta so a
+  classifier false-positive is transparently re-served by `claude-opus-4-8`
+  instead of failing the step. Override or disable with `fallbackModel`.
+- **The planner now knows what the executor can do.** Plan and replan prompts
+  list the registered tools (or state that there are none), so plans are
+  grounded in real capabilities instead of hypothetical ones.
+- **Every model call is budgeted.** Planning, reflection, compaction, and JSON
+  repair now count toward `maxTokens` — previously only step execution did, so
+  the ceiling under-measured real spend.
+- The reflector sees the goal's `constraints`; a `max_tokens`-truncated step
+  result is annotated (`[note: … truncated]`) instead of recorded as a clean
+  success.
+
+### Changed
+
+- **Default model: `claude-sonnet-4-6` → `claude-sonnet-5`** (current Sonnet
+  line; adaptive thinking on by default, near-Opus agentic quality). Default
+  `maxTokens` per call 4096 → 8192 and `maxStepTokens` 4096 → 8192, leaving room
+  for thinking in the same budget.
+
 ## [0.2.0] — 2026-06-22
 
 ### Added
@@ -97,6 +156,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Zero runtime dependencies. 20 tests covering crash-resume, replan accumulation,
   self-correction, budgets, tools, and JSON defense.
 
+[0.3.0]: https://github.com/didrod205/oh-my-fable/releases/tag/v0.3.0
+[0.2.0]: https://github.com/didrod205/oh-my-fable/releases/tag/v0.2.0
 [0.1.2]: https://github.com/didrod205/oh-my-fable/releases/tag/v0.1.2
 [0.1.1]: https://github.com/didrod205/oh-my-fable/releases/tag/v0.1.1
 [0.1.0]: https://github.com/didrod205/oh-my-fable/releases/tag/v0.1.0

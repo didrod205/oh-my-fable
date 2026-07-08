@@ -1,4 +1,4 @@
-import type { Goal, Plan, Observation, Message } from "../core/types.js";
+import type { Goal, Plan, Observation, Message, ToolSchema } from "../core/types.js";
 
 const PLAN_SYSTEM = `You are a planning module. Decompose a goal into an ordered list of executable steps.
 
@@ -6,11 +6,19 @@ Rules:
 - Each step has a single, verifiable intent.
 - If a step is too big, split it further.
 - Never create a step that violates a constraint.
+- Plan only steps the executor can actually perform — with the tools listed, or by pure reasoning/writing when there are none.
 - Order matters; use dependsOn (step ids) when a step needs an earlier one.
 - Respond with ONLY this JSON. No prose, no code fences:
 { "steps": [ { "id": "s1", "intent": "...", "dependsOn": [] } ] }`;
 
-export function planPrompt(goal: Goal): Message[] {
+/** Ground the plan in what the executor can actually do. */
+function toolLines(tools: ToolSchema[]): string {
+  return tools.length
+    ? `Tools the executor can use:\n${tools.map((t) => `  - ${t.name}: ${t.description}`).join("\n")}`
+    : "The executor has NO tools — it can only reason and produce text.";
+}
+
+export function planPrompt(goal: Goal, tools: ToolSchema[] = []): Message[] {
   return [
     { role: "system", content: PLAN_SYSTEM },
     {
@@ -19,6 +27,7 @@ export function planPrompt(goal: Goal): Message[] {
         `Goal: ${goal.description}`,
         goal.constraints?.length ? `Constraints: ${goal.constraints.join("; ")}` : "",
         goal.successCriteria?.length ? `Done when: ${goal.successCriteria.join("; ")}` : "",
+        toolLines(tools),
       ]
         .filter(Boolean)
         .join("\n"),
@@ -34,7 +43,7 @@ Account for the obstacle so the new steps actually get unblocked.
 Respond with ONLY this JSON. No prose, no code fences:
 { "steps": [ { "id": "n1", "intent": "...", "dependsOn": [] } ] }`;
 
-export function replanPrompt(plan: Plan, obs: Observation, notes: string, goal: Goal): Message[] {
+export function replanPrompt(plan: Plan, obs: Observation, notes: string, goal: Goal, tools: ToolSchema[] = []): Message[] {
   const done = plan.steps.filter((s) => s.status === "done");
   const blocked = plan.steps.find((s) => s.id === obs.stepId);
   return [
@@ -44,6 +53,7 @@ export function replanPrompt(plan: Plan, obs: Observation, notes: string, goal: 
       content: [
         `Goal: ${goal.description}`,
         goal.successCriteria?.length ? `Done when: ${goal.successCriteria.join("; ")}` : "",
+        toolLines(tools),
         "",
         "Already completed (do NOT redo):",
         done.length ? done.map((s) => `  ✓ [${s.id}] ${s.intent}${s.result ? ` → ${s.result}` : ""}`).join("\n") : "  (nothing yet)",

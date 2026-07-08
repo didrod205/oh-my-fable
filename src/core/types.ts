@@ -61,6 +61,12 @@ export type Role = "system" | "user" | "assistant";
 export interface Message {
   role: Role;
   content: string;
+  /**
+   * Provider hint: the stable prompt prefix ends at this message. Providers
+   * that support prompt caching (Anthropic → `cache_control`) put a cache
+   * breakpoint here; providers that don't simply ignore it.
+   */
+  cache?: boolean;
 }
 
 export interface ToolSchema {
@@ -90,7 +96,7 @@ export interface CompletionRequest {
   responseFormat?: "text" | "json";
 }
 
-export type StopReason = "end" | "tool_use" | "max_tokens" | "error";
+export type StopReason = "end" | "tool_use" | "max_tokens" | "error" | "refusal";
 
 export interface CompletionResult {
   content: string;
@@ -109,7 +115,15 @@ export interface CompletionResult {
 export interface BudgetState {
   steps: number;
   tokens: number;
+  /** Start of the *current* process session (reset on resume). */
   startedAtMs: number;
+  /**
+   * Active runtime consumed before `startedAtMs`, folded at each checkpoint.
+   * This is what makes a crash a *pause*: the wall-clock budget counts time the
+   * agent actually ran, never the downtime between a crash and its resume.
+   * Optional so checkpoints written by older versions still load.
+   */
+  elapsedMs?: number;
   /** Separate counter so a replan storm can't run forever. */
   replans: number;
 }
@@ -201,7 +215,9 @@ export type RunEvent =
   | { type: "checkpoint"; runId: string }
   | { type: "halted"; reason: string }
   | { type: "done"; reason: string }
-  | { type: "escalation"; step: Step; notes: string };
+  | { type: "escalation"; step: Step; notes: string }
+  /** The final completion check when the plan runs out of steps (plan exhaustion ≠ goal completion). */
+  | { type: "exit_check"; reflection: Reflection };
 
 /** Full run config: data fields + injected dependencies. */
 export interface RunConfig extends Partial<SerializableConfig> {

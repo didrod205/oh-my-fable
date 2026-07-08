@@ -18,7 +18,7 @@ export interface LoopDeps {
 
 function applyReflection(ctx: RunContext, step: Step, obs: Observation, reflection: Reflection): void {
   ctx.meta["lastReflectionNotes"] = reflection.notes;
-  ctx.budget.tokens += obs.tokensUsed;
+  // (tokens are metered at the provider layer — every model call, not just execution)
   ctx.budget.steps += 1;
   if (obs.ok) {
     step.status = "done";
@@ -61,6 +61,45 @@ export async function runLoop(ctx: RunContext, deps: LoopDeps): Promise<RunResul
     // 2. Next actionable step.
     const step = nextPendingStep(ctx);
     if (step === null) {
+      // 2a. Pending steps exist but none is actionable — their dependencies
+      // failed or don't exist. That is a blocked plan, not a finished one.
+      const stranded = ctx.plan.steps.filter((s) => s.status === "pending");
+      if (stranded.length > 0) {
+        const reason = `steps [${stranded.map((s) => s.id).join(", ")}] can never run — their dependencies did not complete`;
+        ctx.meta["lastReflectionNotes"] = reason;
+        const obs: Observation = { stepId: stranded[0]!.id, ok: false, output: "", error: reason, tokensUsed: 0 };
+        ctx.budget.replans += 1;
+        ctx.plan = await planner.replan(ctx.plan, obs, ctx);
+        touch(ctx);
+        await store.save(ctx);
+        onEvent({ type: "replan", revision: ctx.plan.revision, reason });
+        continue;
+      }
+
+      // 2b. Plan exhausted. Plan exhaustion ≠ goal completion: when the goal
+      // has explicit success criteria, verify them before declaring done —
+      // and go back to work if they aren't met yet.
+      if (ctx.goal.successCriteria?.length) {
+        const verdict = await reflector.verifyGoal(ctx);
+        onEvent({ type: "exit_check", reflection: verdict });
+        if (verdict.progress !== "goal_met") {
+          ctx.meta["lastReflectionNotes"] = verdict.notes;
+          const obs: Observation = {
+            stepId: "(exit-check)",
+            ok: false,
+            output: verdict.notes,
+            error: "the plan ran out of steps but the success criteria are not met yet",
+            tokensUsed: 0,
+          };
+          ctx.budget.replans += 1;
+          ctx.plan = await planner.replan(ctx.plan, obs, ctx);
+          touch(ctx);
+          await store.save(ctx);
+          onEvent({ type: "replan", revision: ctx.plan.revision, reason: verdict.notes || "success criteria not met" });
+          continue;
+        }
+      }
+
       ctx.plan.status = "done";
       touch(ctx);
       await store.save(ctx);
@@ -92,7 +131,12 @@ export async function runLoop(ctx: RunContext, deps: LoopDeps): Promise<RunResul
     onEvent({ type: "step_done", step, observation: obs });
     onEvent({ type: "reflection", reflection, step });
 
-    // 7. Checkpoint — the invariant.
+    // 7. Checkpoint — the invariant. Fold active runtime into the budget here
+    // so downtime between a crash and its resume never counts against the
+    // wall-clock ceiling (a crash is a pause, not spent time).
+    const now = Date.now();
+    ctx.budget.elapsedMs = (ctx.budget.elapsedMs ?? 0) + (now - ctx.budget.startedAtMs);
+    ctx.budget.startedAtMs = now;
     touch(ctx);
     await store.save(ctx);
     onEvent({ type: "checkpoint", runId: ctx.runId });

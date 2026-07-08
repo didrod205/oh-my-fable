@@ -22,6 +22,14 @@ export interface AnthropicOptions {
   thinking?: "adaptive";
   /** Reasoning/spend dial for thinking models: low | medium | high | xhigh | max. */
   effort?: Effort;
+  /**
+   * Server-side refusal fallback (`server-side-fallback` beta). Fable/Mythos
+   * run safety classifiers that can decline a benign request mid-run; with a
+   * fallback, the API transparently re-serves the request on the named model
+   * instead of stopping the step. Defaults to "claude-opus-4-8" on Fable/Mythos
+   * models; set `false` to disable, or a model id to override.
+   */
+  fallbackModel?: string | false;
 }
 
 interface AnthropicBlock {
@@ -40,25 +48,44 @@ interface AnthropicUsage {
 }
 
 /**
- * Models that removed the sampling parameters (`temperature`/`top_p`/`top_k`) —
- * sending `temperature` to any of these returns HTTP 400. Opus 4.7/4.8, Fable 5,
- * and Mythos 5. We strip it for them so the provider works against the flagship
- * models, not just Sonnet.
+ * Models that removed (or reject non-default) sampling parameters
+ * (`temperature`/`top_p`/`top_k`) — sending `temperature` to any of these
+ * returns HTTP 400. Opus 4.7/4.8, Sonnet 5, Fable 5, and Mythos 5. We strip it
+ * for them so the provider works against the flagship models, not just older
+ * Sonnets.
  */
 export function modelRejectsSampling(model: string): boolean {
   const m = model.toLowerCase();
-  return m.includes("opus-4-7") || m.includes("opus-4-8") || m.includes("fable") || m.includes("mythos");
+  return m.includes("opus-4-7") || m.includes("opus-4-8") || m.includes("sonnet-5") || m.includes("fable") || m.includes("mythos");
+}
+
+/** Fable-tier models run safety classifiers that can return `stop_reason: "refusal"`. */
+function isFableTier(model: string): boolean {
+  const m = model.toLowerCase();
+  return m.includes("fable") || m.includes("mythos");
+}
+
+interface ConvoMessage {
+  role: "user" | "assistant";
+  content: string;
+  cache?: boolean;
 }
 
 /** Coalesce consecutive same-role turns — the Messages API wants alternation. */
-function coalesce(messages: Array<{ role: "user" | "assistant"; content: string }>): Array<{ role: "user" | "assistant"; content: string }> {
-  const out: Array<{ role: "user" | "assistant"; content: string }> = [];
+function coalesce(messages: ConvoMessage[]): ConvoMessage[] {
+  const out: ConvoMessage[] = [];
   for (const m of messages) {
     const last = out[out.length - 1];
-    if (last && last.role === m.role) last.content += "\n\n" + m.content;
-    else out.push({ ...m });
+    if (last && last.role === m.role) {
+      last.content += "\n\n" + m.content;
+      if (m.cache) last.cache = true;
+    } else out.push({ ...m });
   }
   if (out.length === 0 || out[0]!.role !== "user") out.unshift({ role: "user", content: "(begin)" });
+  // The API allows at most 4 cache breakpoints per request (1 is used by the
+  // system block) — keep only the last 3 message-level flags, defensively.
+  const flagged = out.filter((m) => m.cache);
+  for (const m of flagged.slice(0, Math.max(0, flagged.length - 3))) m.cache = false;
   return out;
 }
 
@@ -77,17 +104,22 @@ export class AnthropicProvider implements Provider {
   private readonly cache: boolean;
   private readonly thinking?: "adaptive";
   private readonly effort?: Effort;
+  private readonly fallbackModel?: string;
 
   constructor(opts: AnthropicOptions = {}) {
     this.apiKey = opts.apiKey ?? process.env["ANTHROPIC_API_KEY"] ?? "";
-    this.model = opts.model ?? "claude-sonnet-4-6";
+    this.model = opts.model ?? "claude-sonnet-5";
     this.baseUrl = opts.baseUrl ?? "https://api.anthropic.com";
     this.version = opts.version ?? "2023-06-01";
     this.maxRetries = opts.maxRetries ?? 4;
-    this.defaultMaxTokens = opts.defaultMaxTokens ?? 4096;
+    // Room for adaptive thinking: on Sonnet 5 / Fable-tier models, thinking is
+    // on by default and shares the max_tokens budget with the visible output.
+    this.defaultMaxTokens = opts.defaultMaxTokens ?? 8192;
     this.cache = opts.cache ?? true;
     this.thinking = opts.thinking;
     this.effort = opts.effort;
+    const fallback = opts.fallbackModel ?? (isFableTier(this.model) ? "claude-opus-4-8" : false);
+    this.fallbackModel = fallback === false ? undefined : fallback;
     if (!this.apiKey) {
       throw new Error("AnthropicProvider needs an API key (pass { apiKey } or set ANTHROPIC_API_KEY).");
     }
@@ -103,13 +135,22 @@ export class AnthropicProvider implements Provider {
       .map((m) => m.content)
       .join("\n\n");
     const convo = coalesce(
-      req.messages.filter((m) => m.role !== "system").map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
+      req.messages.filter((m) => m.role !== "system").map((m) => ({ role: m.role as "user" | "assistant", content: m.content, cache: m.cache })),
+    );
+
+    // Honor `Message.cache` hints: a flagged message becomes a content block
+    // with a cache breakpoint, so the stable prefix ending there is re-read at
+    // ~0.1× on the next call instead of re-billed at full price.
+    const wireMessages = convo.map((m) =>
+      m.cache && this.cache
+        ? { role: m.role, content: [{ type: "text", text: m.content, cache_control: { type: "ephemeral" } }] }
+        : { role: m.role, content: m.content },
     );
 
     const body: Record<string, unknown> = {
       model: this.model,
       max_tokens: req.maxTokens ?? this.defaultMaxTokens,
-      messages: convo,
+      messages: wireMessages,
     };
 
     // Sampling: omit `temperature` for models that reject it (would 400), and
@@ -131,15 +172,23 @@ export class AnthropicProvider implements Provider {
       body["tools"] = req.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters }));
     }
 
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      "x-api-key": this.apiKey,
+      "anthropic-version": this.version,
+    };
+    // Refusal fallback (Fable/Mythos): if the safety classifiers decline the
+    // request, the API re-serves it on the fallback model in the same call.
+    if (this.fallbackModel) {
+      body["fallbacks"] = [{ model: this.fallbackModel }];
+      headers["anthropic-beta"] = "server-side-fallback-2026-06-01";
+    }
+
     const data = await withRetry(
       async () => {
         const res = await fetch(`${this.baseUrl}/v1/messages`, {
           method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-api-key": this.apiKey,
-            "anthropic-version": this.version,
-          },
+          headers,
           body: JSON.stringify(body),
         });
         if (!res.ok) {
@@ -171,7 +220,16 @@ export class AnthropicProvider implements Provider {
     const u = data.usage ?? {};
     const tokensIn = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
 
-    const map: Record<string, StopReason> = { end_turn: "end", tool_use: "tool_use", max_tokens: "max_tokens", stop_sequence: "end" };
+    const map: Record<string, StopReason> = {
+      end_turn: "end",
+      tool_use: "tool_use",
+      max_tokens: "max_tokens",
+      stop_sequence: "end",
+      // Fable-tier safety classifiers can decline a request; with fallbacks on,
+      // this only surfaces when the whole chain refused. Never treat it as success.
+      refusal: "refusal",
+      model_context_window_exceeded: "error",
+    };
     return {
       content,
       toolCalls: toolCalls.length ? toolCalls : undefined,

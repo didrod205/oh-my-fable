@@ -43,11 +43,20 @@ export class Executor {
 
   async execute(step: Step, ctx: RunContext): Promise<Observation> {
     const tools = this.registry.size > 0 ? this.registry.schemas() : undefined;
+
+    // Cache-friendly ordering: stable content first (system, then the append-only
+    // history), volatile content last (plan state + this step's instruction).
+    // The last history message is flagged as a cache breakpoint — on providers
+    // with prompt caching, each step re-reads the replayed history at ~0.1×
+    // instead of paying full price for it every step. Copies only: the flag is
+    // request-local and never persisted into the checkpointed history.
+    const past: Message[] = ctx.history.map((m) => ({ ...m }));
+    if (past.length > 0) past[past.length - 1] = { ...past[past.length - 1]!, cache: true };
+
     const local: Message[] = [
       { role: "system", content: EXEC_SYSTEM },
-      { role: "user", content: background(ctx) },
-      ...ctx.history,
-      { role: "user", content: `Now do this step:\n[${step.id}] ${step.intent}` },
+      ...past,
+      { role: "user", content: `${background(ctx)}\n\nNow do this step:\n[${step.id}] ${step.intent}` },
     ];
 
     let tokensUsed = 0;
@@ -79,8 +88,12 @@ export class Executor {
         tokensUsed += result.tokensIn + result.tokensOut;
       }
 
-      const ok = result.stopReason !== "error";
-      const output = result.content.trim() || (ok ? "(step produced no text output)" : "");
+      const ok = result.stopReason !== "error" && result.stopReason !== "refusal";
+      let output = result.content.trim() || (ok ? "(step produced no text output)" : "");
+      // Surface truncation to the reflector — a cut-off result is a signal, not a success to record silently.
+      if (ok && result.stopReason === "max_tokens") {
+        output += "\n[note: the output hit the step token limit and was truncated]";
+      }
 
       // Record the step exchange in history for continuity (kept lean; tools live in the observation).
       ctx.history.push({ role: "user", content: `Step [${step.id}]: ${step.intent}` });
@@ -91,7 +104,11 @@ export class Executor {
         ok,
         output,
         toolCalls: allToolCalls.length ? allToolCalls : undefined,
-        error: ok ? toolError : `model error (stopReason=${result.stopReason})`,
+        error: ok
+          ? toolError
+          : result.stopReason === "refusal"
+            ? "the model declined this step (safety refusal) — the plan likely needs a different approach"
+            : `model error (stopReason=${result.stopReason})`,
         tokensUsed,
       };
     } catch (err) {

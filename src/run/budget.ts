@@ -19,7 +19,9 @@ export function checkBudget(ctx: RunContext): BudgetVerdict {
   if (b.tokens >= c.maxTokens) {
     return { exceeded: true, reason: `token budget exhausted (${b.tokens}/${c.maxTokens} tokens)` };
   }
-  const elapsed = Date.now() - b.startedAtMs;
+  // Active runtime only: folded time from previous sessions + this session.
+  // Downtime between a crash and its resume never counts (a crash is a pause).
+  const elapsed = (b.elapsedMs ?? 0) + (Date.now() - b.startedAtMs);
   if (elapsed >= c.maxWallClockMs) {
     return { exceeded: true, reason: `wall-clock budget exhausted (${Math.round(elapsed / 1000)}s/${Math.round(c.maxWallClockMs / 1000)}s)` };
   }

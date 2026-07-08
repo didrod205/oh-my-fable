@@ -10,7 +10,7 @@ import { claudeCode, codexCli } from "./providers/cli.js";
 import { ScriptedProvider, reply } from "./providers/provider.js";
 import type { RunEvent, Goal, RunConfig, Provider } from "./core/types.js";
 
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 
 // ── tiny zero-dep arg + color helpers ────────────────────────────────────────
 const useColor = process.stdout.isTTY && !process.env["NO_COLOR"];
@@ -62,6 +62,11 @@ function renderer(): (e: RunEvent) => void {
       case "replan":
         process.stdout.write(`  ${yellow("🔁 replan")} ${dim("rev " + e.revision)}\n`);
         break;
+      case "exit_check": {
+        const met = e.reflection.progress === "goal_met";
+        process.stdout.write(`  ${met ? green("🔎 exit check — criteria met") : yellow("🔎 exit check — not done yet")}${e.reflection.notes ? dim(" — " + e.reflection.notes) : ""}\n`);
+        break;
+      }
       case "compaction":
         process.stdout.write(`  ${dim("🗜  compacted " + e.foldedMessages + " messages")}\n`);
         break;

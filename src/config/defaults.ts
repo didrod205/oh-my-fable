@@ -9,7 +9,9 @@ export const DEFAULT_CONFIG: SerializableConfig = {
   contextTokenLimit: 100_000,
   keepRecent: 8,
   temperature: 0.2,
-  maxStepTokens: 4096,
+  // Leaves room for adaptive thinking on models where it is on by default
+  // (Sonnet 5, Fable-tier) — thinking shares the step's token budget.
+  maxStepTokens: 8192,
 };
 
 export interface ResolvedConfig {

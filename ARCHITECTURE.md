@@ -16,16 +16,22 @@ and reproducibility. Every other decision is reverse-engineered from it.
 ```
 run(goal, config):
   ctx = RunContext.create(goal, config)
-  ctx.plan = planner.plan(goal)
+  ctx.plan = planner.plan(goal)                         # grounded in the executor's tools
   store.save(ctx)
   loop:
     if budget.exceeded:        return halted          # hard ceiling, checked first
     step = nextPendingStep(ctx)
-    if step is null:           return done             # nothing pending = finished
+    if step is null:
+      if pending-but-stranded steps exist: replan      # a blocked plan is not a finished one
+      if goal.successCriteria:
+        verdict = reflector.verifyGoal(ctx)             # exit check — exhaustion ≠ completion
+        if verdict != goal_met: replan; continue
+      return done
     if contextManager.overBudget(ctx): compact         # required path on long runs
     obs        = executor.execute(step, ctx)
     reflection = reflector.reflect(plan, obs, ctx)
     applyReflection(ctx, step, obs, reflection)
+    fold active runtime into budget.elapsedMs           # a crash is a pause, not spent time
     store.save(ctx)                                     # checkpoint — the invariant
     switch reflection.progress:
       goal_met     → done
@@ -73,7 +79,11 @@ is how they finish.
 
 Four verdicts: `on_track`, `needs_replan`, `blocked`, `goal_met`. `goal_met` is
 separate because an over-eager plan should be allowed to stop early — plan
-exhaustion and goal completion are different events.
+exhaustion and goal completion are different events. The same principle runs in
+the other direction too: when the plan runs out of steps and the goal has
+success criteria, `verifyGoal` runs a final **exit check** against the recorded
+evidence — an exhausted plan with unmet criteria replans instead of declaring a
+false done.
 
 It's a **heuristic + model hybrid**: cheap, certain things (a step that failed N
 times in a row → `blocked`) are decided in code before any model call. The model
@@ -108,6 +118,10 @@ immediate context derails the very next step). Digests meta-compact if they grow
 | process crash | store checkpoint | resume from last `ctx` |
 | cost runaway | three budget guards | halt cleanly, work preserved |
 | plan over/under-completes | reflector `goal_met` | stop when criteria met, even with steps left |
+| plan exhausts with criteria unmet | reflector `verifyGoal` exit check | replan and keep working, never a false done |
+| pending steps stranded by failed deps | loop step-selection | replan around them, never a false done |
+| model refuses a step (safety) | provider `refusal` stop reason | observation fails → reflector routes; Fable-tier auto-fallback to opus |
+| process dead for hours before resume | `budget.elapsedMs` folding | wall-clock counts active runtime only |
 
 ## Extension points (swap without touching the core)
 

@@ -1,4 +1,4 @@
-import type { Goal, Plan, Step, Observation, RunContext, Provider } from "../core/types.js";
+import type { Goal, Plan, Step, Observation, RunContext, Provider, ToolSchema } from "../core/types.js";
 import { parseWithRepair } from "../core/json.js";
 import { planPrompt, replanPrompt } from "./prompts.js";
 
@@ -30,10 +30,12 @@ export class Planner {
   constructor(
     private readonly provider: Provider,
     private readonly temperature: number,
+    /** What the executor can actually do — plans grounded in real capabilities, not hypothetical ones. */
+    private readonly tools: ToolSchema[] = [],
   ) {}
 
   async plan(goal: Goal): Promise<Plan> {
-    const res = await this.provider.complete({ messages: planPrompt(goal), responseFormat: "json", temperature: this.temperature });
+    const res = await this.provider.complete({ messages: planPrompt(goal, this.tools), responseFormat: "json", temperature: this.temperature });
     const raw = await parseWithRepair<RawPlan>(res.content, this.provider, (v) => Array.isArray(v.steps));
     let steps = coerceSteps(raw, "s");
     // Graceful degradation: a plan we can't read becomes a single do-the-goal step.
@@ -51,7 +53,7 @@ export class Planner {
   async replan(plan: Plan, obs: Observation, ctx: RunContext): Promise<Plan> {
     const notes = String(ctx.meta["lastReflectionNotes"] ?? "");
     const res = await this.provider.complete({
-      messages: replanPrompt(plan, obs, notes, ctx.goal),
+      messages: replanPrompt(plan, obs, notes, ctx.goal, this.tools),
       responseFormat: "json",
       temperature: this.temperature,
     });

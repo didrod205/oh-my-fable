@@ -20,7 +20,7 @@ export function createContext(goal: Goal, config: SerializableConfig): RunContex
     plan: { goal: goal.description, steps: [], status: "active", revision: 0 },
     history: [],
     digests: [],
-    budget: { steps: 0, tokens: 0, startedAtMs: Date.now(), replans: 0 },
+    budget: { steps: 0, tokens: 0, startedAtMs: Date.now(), elapsedMs: 0, replans: 0 },
     config,
     createdAt: ts,
     updatedAt: ts,
