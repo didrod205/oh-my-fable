@@ -23,6 +23,11 @@ export class ToolRegistry {
     return this.map.size;
   }
 
+  /** The tools that only inspect state — safe to hand to the exit-check verifier. */
+  readOnlyTools(): Tool[] {
+    return [...this.map.values()].filter((t) => t.readOnly === true);
+  }
+
   /** Run a tool, turning any thrown error into a ToolResult — the loop never dies on a tool. */
   async run(name: string, input: unknown): Promise<ToolResult> {
     const tool = this.map.get(name);
@@ -35,12 +40,13 @@ export class ToolRegistry {
   }
 }
 
-/** Define a tool with less ceremony. */
+/** Define a tool with less ceremony. Mark inspection-only tools `readOnly` so the exit-check verifier may use them. */
 export function defineTool(
   name: string,
   description: string,
   parameters: Record<string, unknown>,
   handler: (input: unknown) => Promise<ToolResult> | ToolResult,
+  opts: { readOnly?: boolean } = {},
 ): Tool {
-  return { name, description, schema: { name, description, parameters }, handler };
+  return { name, description, schema: { name, description, parameters }, handler, readOnly: opts.readOnly };
 }

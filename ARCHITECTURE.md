@@ -87,8 +87,14 @@ false done.
 
 It's a **heuristic + model hybrid**: cheap, certain things (a step that failed N
 times in a row → `blocked`) are decided in code before any model call. The model
-judges the rest, with JSON self-repair and a conservative fallback (`needs_replan`
-on unparseable output — one more loop beats a wrong exit).
+judges the rest — with schema-enforced structured output where the provider
+supports it, JSON self-repair as the fallback, and a conservative default
+(`needs_replan` on unparseable output — one more loop beats a wrong exit).
+
+The exit check has **read-only hands**: tools marked `readOnly` are handed to
+`verifyGoal`, which may inspect the actual artifacts (read files, list
+directories) in a bounded tool loop before judging. Write tools are
+structurally withheld from the verifier.
 
 The reflector and the budget together are the **double safety net** against the two
 runaway loops:

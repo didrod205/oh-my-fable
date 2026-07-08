@@ -11,6 +11,28 @@ Rules:
 - Respond with ONLY this JSON. No prose, no code fences:
 { "steps": [ { "id": "s1", "intent": "...", "dependsOn": [] } ] }`;
 
+/** Schema for a plan response — schema-capable providers enforce it server-side. */
+export const PLAN_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    steps: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          intent: { type: "string" },
+          dependsOn: { type: "array", items: { type: "string" } },
+        },
+        required: ["id", "intent", "dependsOn"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["steps"],
+  additionalProperties: false,
+};
+
 /** Ground the plan in what the executor can actually do. */
 function toolLines(tools: ToolSchema[]): string {
   return tools.length

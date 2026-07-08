@@ -4,6 +4,33 @@ All notable changes to oh-my-fable are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-07-08
+
+### Added
+
+- **Native tool wire formats.** The executor's tool loop now sends structured
+  tool messages — `AnthropicProvider` renders real `tool_use` / `tool_result`
+  blocks (with `is_error` on failures) and `OpenAICompatProvider` renders
+  `tool_calls` + `role: "tool"` messages — instead of flattening everything to
+  text. `Message` gains `toolCalls` / `toolResults`; the flattened text remains
+  as the fallback for text-only providers.
+- **Schema-enforced structured outputs.** `CompletionRequest.responseSchema` +
+  new `PLAN_SCHEMA` / `REFLECTION_SCHEMA`: on models that support it,
+  `AnthropicProvider` enforces plans and reflections via
+  `output_config.format` (guaranteed-valid JSON — the repair round-trip never
+  fires), and `claudeCode()` enforces them per-request via `--json-schema`.
+  Prompt-instructed JSON + parse-repair remains the fallback everywhere else.
+- **The exit-check verifier has hands.** Tools can be marked
+  `readOnly` (`defineTool(..., { readOnly: true })`); the fs toolset marks
+  `read_file` / `list_dir`. The final goal check can now *inspect the actual
+  artifacts* (read the files, list the directories) with a bounded read-only
+  tool loop before judging — evidence over log — while write tools are
+  structurally withheld from it.
+
+### Fixed
+
+- `npm pkg fix` applied (bin path normalization) — silences the publish warning.
+
 ## [0.3.0] — 2026-07-08
 
 The "does it actually think the way it claims to?" release: an outside review of
@@ -156,6 +183,7 @@ fixed, with tests.
 - Zero runtime dependencies. 20 tests covering crash-resume, replan accumulation,
   self-correction, budgets, tools, and JSON defense.
 
+[0.4.0]: https://github.com/didrod205/oh-my-fable/releases/tag/v0.4.0
 [0.3.0]: https://github.com/didrod205/oh-my-fable/releases/tag/v0.3.0
 [0.2.0]: https://github.com/didrod205/oh-my-fable/releases/tag/v0.2.0
 [0.1.2]: https://github.com/didrod205/oh-my-fable/releases/tag/v0.1.2

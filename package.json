@@ -1,6 +1,6 @@
 {
   "name": "oh-my-fable",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "The autonomous-agent harness that actually finishes long tasks — because it plans first, self-corrects every step, and survives crashes. The whole run lives in one serializable RunContext, checkpointed after every step, so it resumes exactly where it died. Model-agnostic, zero dependencies, deterministically testable.",
   "type": "module",
   "main": "./dist/index.js",
@@ -14,8 +14,8 @@
     }
   },
   "bin": {
-    "oh-my-fable": "./dist/cli.js",
-    "omf": "./dist/cli.js"
+    "oh-my-fable": "dist/cli.js",
+    "omf": "dist/cli.js"
   },
   "files": [
     "dist"

@@ -175,12 +175,15 @@ export function claudeRequestArgs(
 ): string[] {
   const args: string[] = [];
   if (opts.json) args.push("--output-format", "json");
+  // A static option schema wins; otherwise the request's own schema (the
+  // harness passes one for plans and reflections) is enforced per call.
+  const schema = req.responseFormat === "json" ? (opts.jsonSchema ?? req.responseSchema) : undefined;
   if (opts.appendSystem) {
     let sys = req.messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
-    if (req.responseFormat === "json") sys = (sys ? sys + "\n\n" : "") + "Output ONLY valid JSON. No prose, no code fences.";
+    if (req.responseFormat === "json" && !schema) sys = (sys ? sys + "\n\n" : "") + "Output ONLY valid JSON. No prose, no code fences.";
     if (sys) args.push("--append-system-prompt", sys);
   }
-  if (opts.jsonSchema && req.responseFormat === "json") args.push("--json-schema", JSON.stringify(opts.jsonSchema));
+  if (schema) args.push("--json-schema", JSON.stringify(schema));
   return args;
 }
 

@@ -1,4 +1,4 @@
-import type { Provider, CompletionRequest, CompletionResult, Message, ToolCall, StopReason } from "../core/types.js";
+import type { Provider, CompletionRequest, CompletionResult, Message, ToolCall, ToolResultBlock, StopReason } from "../core/types.js";
 import { estimateTokens, withRetry } from "./provider.js";
 
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
@@ -65,10 +65,34 @@ function isFableTier(model: string): boolean {
   return m.includes("fable") || m.includes("mythos");
 }
 
+/**
+ * Models with schema-enforced structured outputs (`output_config.format`).
+ * When the request carries a `responseSchema`, these skip the prompt-instructed
+ * JSON + repair path entirely — the API guarantees a schema-valid response.
+ */
+export function modelSupportsStructuredOutputs(model: string): boolean {
+  const m = model.toLowerCase();
+  return (
+    m.includes("sonnet-5") ||
+    m.includes("opus-4-8") ||
+    m.includes("haiku-4-5") ||
+    m.includes("opus-4-5") ||
+    m.includes("opus-4-1") ||
+    m.includes("fable") ||
+    m.includes("mythos")
+  );
+}
+
 interface ConvoMessage {
   role: "user" | "assistant";
   content: string;
   cache?: boolean;
+  toolCalls?: ToolCall[];
+  toolResults?: ToolResultBlock[];
+}
+
+function hasToolParts(m: ConvoMessage): boolean {
+  return !!(m.toolCalls?.length || m.toolResults?.length);
 }
 
 /** Coalesce consecutive same-role turns — the Messages API wants alternation. */
@@ -76,7 +100,8 @@ function coalesce(messages: ConvoMessage[]): ConvoMessage[] {
   const out: ConvoMessage[] = [];
   for (const m of messages) {
     const last = out[out.length - 1];
-    if (last && last.role === m.role) {
+    // Never merge across structured tool messages — their block layout is exact.
+    if (last && last.role === m.role && !hasToolParts(last) && !hasToolParts(m)) {
       last.content += "\n\n" + m.content;
       if (m.cache) last.cache = true;
     } else out.push({ ...m });
@@ -135,17 +160,32 @@ export class AnthropicProvider implements Provider {
       .map((m) => m.content)
       .join("\n\n");
     const convo = coalesce(
-      req.messages.filter((m) => m.role !== "system").map((m) => ({ role: m.role as "user" | "assistant", content: m.content, cache: m.cache })),
+      req.messages
+        .filter((m) => m.role !== "system")
+        .map((m) => ({ role: m.role as "user" | "assistant", content: m.content, cache: m.cache, toolCalls: m.toolCalls, toolResults: m.toolResults })),
     );
 
-    // Honor `Message.cache` hints: a flagged message becomes a content block
-    // with a cache breakpoint, so the stable prefix ending there is re-read at
-    // ~0.1× on the next call instead of re-billed at full price.
-    const wireMessages = convo.map((m) =>
-      m.cache && this.cache
+    // Render each message. Structured tool messages become native blocks
+    // (tool_use / tool_result) — more precise than flattened text, and the ids
+    // stay addressable. `Message.cache` hints become cache breakpoints, so the
+    // stable prefix ending there is re-read at ~0.1× on the next call.
+    const wireMessages = convo.map((m) => {
+      if (hasToolParts(m)) {
+        const blocks: Record<string, unknown>[] = [];
+        // tool_result blocks must come first in a user message.
+        for (const r of m.toolResults ?? []) {
+          blocks.push({ type: "tool_result", tool_use_id: r.toolCallId, content: r.output, ...(r.ok ? {} : { is_error: true }) });
+        }
+        if (m.role === "assistant") {
+          if (m.content) blocks.push({ type: "text", text: m.content });
+          for (const c of m.toolCalls ?? []) blocks.push({ type: "tool_use", id: c.id, name: c.name, input: c.input ?? {} });
+        }
+        return { role: m.role, content: blocks };
+      }
+      return m.cache && this.cache
         ? { role: m.role, content: [{ type: "text", text: m.content, cache_control: { type: "ephemeral" } }] }
-        : { role: m.role, content: m.content },
-    );
+        : { role: m.role, content: m.content };
+    });
 
     const body: Record<string, unknown> = {
       model: this.model,
@@ -160,10 +200,20 @@ export class AnthropicProvider implements Provider {
     }
 
     if (this.thinking === "adaptive") body["thinking"] = { type: "adaptive" };
-    if (this.effort) body["output_config"] = { effort: this.effort };
+
+    // Schema-enforced structured outputs: guaranteed-valid JSON, no repair
+    // round-trip. Only on models that support it, and only for plain JSON
+    // requests (not combined with tool use).
+    const useSchema =
+      req.responseFormat === "json" && !!req.responseSchema && !req.tools?.length && modelSupportsStructuredOutputs(this.model);
+    const outputConfig: Record<string, unknown> = {};
+    if (this.effort) outputConfig["effort"] = this.effort;
+    if (useSchema) outputConfig["format"] = { type: "json_schema", schema: req.responseSchema };
+    if (Object.keys(outputConfig).length > 0) body["output_config"] = outputConfig;
 
     let sys = system;
-    if (req.responseFormat === "json") sys = (sys ? sys + "\n\n" : "") + "Output ONLY valid JSON. No prose, no code fences.";
+    // The prompt-instructed JSON path is the fallback when the schema can't be enforced.
+    if (req.responseFormat === "json" && !useSchema) sys = (sys ? sys + "\n\n" : "") + "Output ONLY valid JSON. No prose, no code fences.";
     if (sys) {
       // A cache breakpoint on the system block caches tools + system together.
       body["system"] = this.cache ? [{ type: "text", text: sys, cache_control: { type: "ephemeral" } }] : sys;

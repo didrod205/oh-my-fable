@@ -1,9 +1,13 @@
-import type { Plan, Observation, Reflection, Progress, RunContext, Provider } from "../core/types.js";
+import type { Plan, Observation, Reflection, Progress, RunContext, Provider, Message, ToolResultBlock } from "../core/types.js";
 import { findStep } from "../run/context.js";
 import { parseWithRepair } from "../core/json.js";
-import { reflectPrompt, verifyPrompt } from "./prompts.js";
+import { reflectPrompt, verifyPrompt, REFLECTION_SCHEMA } from "./prompts.js";
+import type { ToolRegistry } from "../executor/tools.js";
 
 const PROGRESS_VALUES: Progress[] = ["on_track", "needs_replan", "blocked", "goal_met"];
+
+/** Evidence-gathering is bounded — the verifier looks, it doesn't wander. */
+const MAX_VERIFY_HOPS = 5;
 
 interface RawReflection {
   progress?: unknown;
@@ -12,7 +16,11 @@ interface RawReflection {
 }
 
 export class Reflector {
-  constructor(private readonly provider: Provider) {}
+  constructor(
+    private readonly provider: Provider,
+    /** Read-only tools the exit check may use to inspect real artifacts. */
+    private readonly verifierTools?: ToolRegistry,
+  ) {}
 
   async reflect(plan: Plan, obs: Observation, ctx: RunContext): Promise<Reflection> {
     const step = findStep(ctx, obs.stepId);
@@ -33,6 +41,7 @@ export class Reflector {
     const res = await this.provider.complete({
       messages: reflectPrompt(plan, obs, ctx.goal, step),
       responseFormat: "json",
+      responseSchema: REFLECTION_SCHEMA,
       temperature: 0,
     });
 
@@ -57,11 +66,35 @@ export class Reflector {
    * instead of assuming "no steps left" means "done".
    */
   async verifyGoal(ctx: RunContext): Promise<Reflection> {
-    const res = await this.provider.complete({
-      messages: verifyPrompt(ctx),
+    // The verifier gets hands: read-only tools to inspect the real artifacts
+    // (files, directories) the success criteria refer to — evidence over log.
+    const registry = this.verifierTools && this.verifierTools.size > 0 ? this.verifierTools : undefined;
+    const tools = registry ? registry.schemas() : undefined;
+    const messages: Message[] = verifyPrompt(ctx, !!tools);
+
+    let res = await this.provider.complete({
+      messages,
+      tools,
       responseFormat: "json",
+      // Schema enforcement and tool use don't mix — prompt-JSON when inspecting.
+      responseSchema: tools ? undefined : REFLECTION_SCHEMA,
       temperature: 0,
     });
+
+    let hops = 0;
+    while (registry && res.stopReason === "tool_use" && res.toolCalls?.length && hops < MAX_VERIFY_HOPS) {
+      hops++;
+      const resultsText: string[] = [];
+      const resultBlocks: ToolResultBlock[] = [];
+      for (const call of res.toolCalls) {
+        const out = await registry.run(call.name, call.input);
+        resultBlocks.push({ toolCallId: call.id, ok: out.ok, output: out.ok ? out.output : (out.error ?? "tool failed") });
+        resultsText.push(`- ${call.name}: ${out.ok ? out.output : `ERROR: ${out.error}`}`);
+      }
+      messages.push({ role: "assistant", content: res.content, toolCalls: res.toolCalls });
+      messages.push({ role: "user", content: `Tool results:\n${resultsText.join("\n")}\n\nNow give your verdict.`, toolResults: resultBlocks });
+      res = await this.provider.complete({ messages, tools, responseFormat: "json", temperature: 0 });
+    }
 
     const raw = await parseWithRepair<RawReflection>(res.content, this.provider, (v) => typeof v.progress === "string");
 

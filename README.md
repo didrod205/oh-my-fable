@@ -212,13 +212,21 @@ const search = defineTool(
   "Search the web and return results.",
   { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
   async ({ query }) => ({ ok: true, output: await fetchResults(query) }),
+  { readOnly: true }, // inspection-only tools may also be used by the exit check
 );
 
 await run(goal, { provider: new AnthropicProvider(), tools: [search] });
 ```
 
 A tool that throws becomes an `Observation`, not a crash — the reflector decides
-what to do about it.
+what to do about it. Tool calls travel in each provider's **native wire format**
+(Anthropic `tool_use`/`tool_result` blocks, OpenAI `tool_calls`/`role: "tool"`),
+with text flattening as the fallback.
+
+Tools marked `{ readOnly: true }` (the fs toolset marks `read_file`/`list_dir`)
+are also handed to the **exit-check verifier**, so before declaring the goal met
+it can open the actual files the success criteria talk about — evidence over
+log. Write tools are structurally withheld from it.
 
 ## Watch it work
 
@@ -257,10 +265,12 @@ plan → [ budget? → next step → compact? → execute → reflect → checkp
 - **planner** — goal → ordered steps, grounded in the tools the executor
   actually has; `replan` accumulates instead of resetting.
 - **executor** — runs one step, including a provider-agnostic tool mini-loop.
-- **reflector** — heuristics first (cheap, certain), then the model, with JSON
-  self-repair and a conservative fallback (a wrong early exit is worse than one
+- **reflector** — heuristics first (cheap, certain), then the model, with
+  schema-enforced JSON where the model supports it (self-repair as the
+  fallback) and a conservative default (a wrong early exit is worse than one
   more loop). When the plan runs out of steps, it runs the final **exit check**
-  against the success criteria — plan exhaustion is not goal completion.
+  against the success criteria — with read-only tools, it inspects the actual
+  artifacts. Plan exhaustion is not goal completion.
 - **contextManager** — folds old turns into digests so long runs stay inside the
   window; the plan is never compacted.
 - **store / budget** — checkpoint after every step; guard against runaways.

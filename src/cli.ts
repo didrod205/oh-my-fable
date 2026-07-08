@@ -10,7 +10,7 @@ import { claudeCode, codexCli } from "./providers/cli.js";
 import { ScriptedProvider, reply } from "./providers/provider.js";
 import type { RunEvent, Goal, RunConfig, Provider } from "./core/types.js";
 
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 
 // ── tiny zero-dep arg + color helpers ────────────────────────────────────────
 const useColor = process.stdout.isTTY && !process.env["NO_COLOR"];

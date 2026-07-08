@@ -34,6 +34,7 @@ export function fsTools(root: string = process.cwd()): Tool[] {
           return { ok: false, output: "", error: (e as Error).message };
         }
       },
+      { readOnly: true },
     ),
     defineTool(
       "write_file",
@@ -65,6 +66,7 @@ export function fsTools(root: string = process.cwd()): Tool[] {
           return { ok: false, output: "", error: (e as Error).message };
         }
       },
+      { readOnly: true },
     ),
   ];
 }

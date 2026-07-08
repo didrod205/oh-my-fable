@@ -58,9 +58,32 @@ export class OpenAICompatProvider implements Provider {
   }
 
   async complete(req: CompletionRequest): Promise<CompletionResult> {
+    // Native tool wire format where the messages carry structured tool parts:
+    // assistant `tool_calls`, results as `role: "tool"` messages. These only
+    // occur when the same server produced tool_calls earlier, so it understands
+    // the format. Plain messages pass through unchanged.
+    const messages: Record<string, unknown>[] = [];
+    for (const m of req.messages) {
+      if (m.role === "user" && m.toolResults?.length) {
+        for (const r of m.toolResults) {
+          messages.push({ role: "tool", tool_call_id: r.toolCallId, content: r.ok ? r.output : `ERROR: ${r.output}` });
+        }
+        continue;
+      }
+      if (m.role === "assistant" && m.toolCalls?.length) {
+        messages.push({
+          role: "assistant",
+          content: m.content || null,
+          tool_calls: m.toolCalls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: JSON.stringify(c.input ?? {}) } })),
+        });
+        continue;
+      }
+      messages.push({ role: m.role, content: m.content });
+    }
+
     const body: Record<string, unknown> = {
       model: this.model,
-      messages: req.messages.map((m) => ({ role: m.role, content: m.content })),
+      messages,
       max_tokens: req.maxTokens ?? this.defaultMaxTokens,
       temperature: req.temperature ?? 1,
     };

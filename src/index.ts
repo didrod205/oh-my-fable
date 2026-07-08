@@ -31,10 +31,13 @@ function buildDeps(config: RunConfig, ctx: RunContext): LoopDeps {
   const provider = meterProvider(config.provider, ctx);
   const store = config.store ?? new FileStore(config.runsDir);
   const registry = new ToolRegistry(config.tools ?? []);
+  // The exit-check verifier gets hands, but only read-only ones — it can look
+  // at real artifacts (read files, list dirs) without being able to change them.
+  const verifierTools = new ToolRegistry(registry.readOnlyTools());
   return {
     planner: new Planner(provider, serializable.temperature, registry.schemas()),
     executor: new Executor(provider, registry, { temperature: serializable.temperature, maxStepTokens: serializable.maxStepTokens }),
-    reflector: new Reflector(provider),
+    reflector: new Reflector(provider, verifierTools),
     contextManager: new ContextManager(provider, serializable),
     store,
     onEvent: config.onEvent ?? (() => {}),
@@ -86,8 +89,10 @@ export { runLoop } from "./core/loop.js";
 export type { LoopDeps } from "./core/loop.js";
 export { ScriptedProvider, reply, withRetry, estimateTokens } from "./providers/provider.js";
 export type { ScriptedResponse } from "./providers/provider.js";
-export { AnthropicProvider, modelRejectsSampling } from "./providers/anthropic.js";
+export { AnthropicProvider, modelRejectsSampling, modelSupportsStructuredOutputs } from "./providers/anthropic.js";
 export type { AnthropicOptions, Effort } from "./providers/anthropic.js";
+export { PLAN_SCHEMA } from "./planner/prompts.js";
+export { REFLECTION_SCHEMA } from "./reflector/prompts.js";
 export { OpenAICompatProvider, ollama } from "./providers/openai.js";
 export type { OpenAICompatOptions } from "./providers/openai.js";
 export { CliProvider, claudeCode, codexCli, parseClaudeJson, claudeRequestArgs, DEFAULT_CLAUDE_TOOLS } from "./providers/cli.js";

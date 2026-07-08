@@ -1,6 +1,6 @@
 import type { Goal, Plan, Step, Observation, RunContext, Provider, ToolSchema } from "../core/types.js";
 import { parseWithRepair } from "../core/json.js";
-import { planPrompt, replanPrompt } from "./prompts.js";
+import { planPrompt, replanPrompt, PLAN_SCHEMA } from "./prompts.js";
 
 interface RawStep {
   id?: unknown;
@@ -35,7 +35,7 @@ export class Planner {
   ) {}
 
   async plan(goal: Goal): Promise<Plan> {
-    const res = await this.provider.complete({ messages: planPrompt(goal, this.tools), responseFormat: "json", temperature: this.temperature });
+    const res = await this.provider.complete({ messages: planPrompt(goal, this.tools), responseFormat: "json", responseSchema: PLAN_SCHEMA, temperature: this.temperature });
     const raw = await parseWithRepair<RawPlan>(res.content, this.provider, (v) => Array.isArray(v.steps));
     let steps = coerceSteps(raw, "s");
     // Graceful degradation: a plan we can't read becomes a single do-the-goal step.
@@ -55,6 +55,7 @@ export class Planner {
     const res = await this.provider.complete({
       messages: replanPrompt(plan, obs, notes, ctx.goal, this.tools),
       responseFormat: "json",
+      responseSchema: PLAN_SCHEMA,
       temperature: this.temperature,
     });
     const raw = await parseWithRepair<RawPlan>(res.content, this.provider, (v) => Array.isArray(v.steps));

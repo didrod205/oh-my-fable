@@ -67,6 +67,26 @@ export interface Message {
    * breakpoint here; providers that don't simply ignore it.
    */
   cache?: boolean;
+  /**
+   * Tool calls this assistant message made (tool loop). Providers with a native
+   * tool wire format render these as structured blocks (Anthropic `tool_use`,
+   * OpenAI `tool_calls`); text-only providers fall back to `content`.
+   */
+  toolCalls?: ToolCall[];
+  /**
+   * Results for the previous assistant message's tool calls (tool loop).
+   * Rendered natively where supported (Anthropic `tool_result`, OpenAI
+   * `role: "tool"`); text-only providers fall back to `content`.
+   */
+  toolResults?: ToolResultBlock[];
+}
+
+/** One tool call's outcome, addressed back to the call that requested it. */
+export interface ToolResultBlock {
+  toolCallId: string;
+  ok: boolean;
+  /** The tool's output — or its error text when `ok` is false. */
+  output: string;
 }
 
 export interface ToolSchema {
@@ -94,6 +114,13 @@ export interface CompletionRequest {
   maxTokens?: number;
   temperature?: number;
   responseFormat?: "text" | "json";
+  /**
+   * JSON schema for the expected response (with `responseFormat: "json"`).
+   * Providers that support schema-enforced output use it (Anthropic structured
+   * outputs, `claude -p --json-schema`) — guaranteed-valid JSON, no repair
+   * round-trip. Others fall back to prompt-instructed JSON + parse repair.
+   */
+  responseSchema?: Record<string, unknown>;
 }
 
 export type StopReason = "end" | "tool_use" | "max_tokens" | "error" | "refusal";
@@ -201,6 +228,12 @@ export interface Tool {
   description: string;
   schema: ToolSchema;
   handler(input: unknown): Promise<ToolResult> | ToolResult;
+  /**
+   * True for tools that only inspect state and never mutate it (read a file,
+   * list a directory). Only these are handed to the exit-check verifier, so it
+   * can look at real artifacts without being able to change them.
+   */
+  readOnly?: boolean;
 }
 
 // ── Observability ────────────────────────────────────────────────────────────

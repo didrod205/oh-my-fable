@@ -42,21 +42,37 @@ export function reflectPrompt(plan: Plan, obs: Observation, goal: Goal, step: St
   ];
 }
 
+/** Schema for a reflection/verdict response — schema-capable providers enforce it server-side. */
+export const REFLECTION_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    progress: { type: "string", enum: ["on_track", "needs_replan", "blocked", "goal_met"] },
+    notes: { type: "string" },
+    confidence: { type: "number" },
+  },
+  required: ["progress", "notes", "confidence"],
+  additionalProperties: false,
+};
+
 const VERIFY_SYSTEM = `You are the final completion check of an autonomous agent. Every planned step has finished. Judge STRICTLY whether the goal's success criteria are ALL satisfied by the evidence below.
 
-- Judge only from the recorded evidence. If a criterion is not clearly satisfied by it, the criterion is NOT met.
+- Judge only from the evidence. If a criterion is not clearly satisfied by it, the criterion is NOT met.
 - goal_met      — every success criterion is satisfied.
 - needs_replan  — something is still missing; say exactly what, so the next plan can close the gap.
 
 Respond with ONLY this JSON. No prose, no code fences:
 { "progress": "goal_met" | "needs_replan", "notes": "what is missing (or why it is complete)", "confidence": 0.0 }`;
 
-export function verifyPrompt(ctx: RunContext): Message[] {
+const VERIFY_TOOLS_HINT = `
+
+You have read-only tools. Before judging, INSPECT the actual artifacts the criteria refer to (read the files, list the directories) — check the evidence itself, don't trust the log alone. Then give your verdict.`;
+
+export function verifyPrompt(ctx: RunContext, withTools = false): Message[] {
   const goal = ctx.goal;
   const done = ctx.plan.steps.filter((s) => s.status === "done");
   const failed = ctx.plan.steps.filter((s) => s.status === "failed");
   return [
-    { role: "system", content: VERIFY_SYSTEM },
+    { role: "system", content: withTools ? VERIFY_SYSTEM + VERIFY_TOOLS_HINT : VERIFY_SYSTEM },
     {
       role: "user",
       content: [

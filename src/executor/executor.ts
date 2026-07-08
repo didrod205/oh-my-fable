@@ -1,4 +1,4 @@
-import type { Step, RunContext, Observation, Provider, Message, ToolCall } from "../core/types.js";
+import type { Step, RunContext, Observation, Provider, Message, ToolCall, ToolResultBlock } from "../core/types.js";
 import { ToolRegistry } from "./tools.js";
 
 const EXEC_SYSTEM = `You are the execution module of an autonomous agent. You are given the overall goal for context and exactly ONE step to perform now.
@@ -76,14 +76,19 @@ export class Executor {
       while (result.stopReason === "tool_use" && result.toolCalls?.length && hops < MAX_TOOL_HOPS) {
         hops++;
         const resultsText: string[] = [];
+        const resultBlocks: ToolResultBlock[] = [];
         for (const call of result.toolCalls) {
           allToolCalls.push(call);
           const out = await this.registry.run(call.name, call.input);
           if (!out.ok) toolError = out.error;
+          resultBlocks.push({ toolCallId: call.id, ok: out.ok, output: out.ok ? out.output : (out.error ?? "tool failed") });
           resultsText.push(`- ${call.name}: ${out.ok ? out.output : `ERROR: ${out.error}`}`);
         }
-        local.push({ role: "assistant", content: result.content || `(requested: ${result.toolCalls.map((c) => c.name).join(", ")})` });
-        local.push({ role: "user", content: `Tool results:\n${resultsText.join("\n")}\n\nContinue the step with these.` });
+        // Structured tool messages: providers with a native tool wire format
+        // (Anthropic tool_use/tool_result, OpenAI tool_calls/role:"tool") render
+        // these exactly; the flattened `content` is the text-only fallback.
+        local.push({ role: "assistant", content: result.content, toolCalls: result.toolCalls });
+        local.push({ role: "user", content: `Tool results:\n${resultsText.join("\n")}\n\nContinue the step with these.`, toolResults: resultBlocks });
         result = await this.provider.complete({ messages: local, tools, temperature: this.opts.temperature, maxTokens: this.opts.maxStepTokens });
         tokensUsed += result.tokensIn + result.tokensOut;
       }
