@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { existsSync } from "node:fs";
 import { createContext } from "./run/context.js";
 import { resolveSerializable } from "./config/defaults.js";
 import { runWith, resume } from "./index.js";
@@ -9,6 +10,7 @@ import { OpenAICompatProvider, ollama } from "./providers/openai.js";
 import { claudeCode, codexCli } from "./providers/cli.js";
 import { ScriptedProvider, reply } from "./providers/provider.js";
 import type { RunEvent, Goal, RunConfig, Provider } from "./core/types.js";
+import { invocationOf, withRemembered, describeInvocation, type Invocation } from "./config/invocation.js";
 
 const VERSION = "0.4.0";
 
@@ -39,6 +41,14 @@ function parseArgs(argv: string[]): Args {
 function fail(msg: string): never {
   process.stderr.write(`\noh-my-fable: ${msg}\n\n`);
   process.exit(2);
+}
+
+/** Stored timestamps are ISO/UTC — show them on the reader's own clock. */
+function localTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso.slice(0, 16).replace("T", " ");
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
 // ── live event renderer ──────────────────────────────────────────────────────
@@ -115,11 +125,16 @@ function makeProvider(flags: Args["flags"]): Provider {
   }
 }
 
+/** Where checkpoints live — `--runs-dir`, or `runs/` beside the caller. */
+function runsDirOf(flags: Args["flags"]): string {
+  return typeof flags["runs-dir"] === "string" ? (flags["runs-dir"] as string) : "runs";
+}
+
 function commonConfig(flags: Args["flags"], provider: Provider): RunConfig {
   const tools = flags["tools"] === "fs" ? fsTools() : [];
   return {
     provider,
-    store: new FileStore(typeof flags["runs-dir"] === "string" ? (flags["runs-dir"] as string) : "runs"),
+    store: new FileStore(runsDirOf(flags)),
     tools,
     onEvent: flags["quiet"] ? undefined : renderer(),
     maxSteps: flags["max-steps"] ? Number(flags["max-steps"]) : undefined,
@@ -138,13 +153,25 @@ async function cmdRun(args: Args): Promise<void> {
   const provider = makeProvider(args.flags);
   const config = commonConfig(args.flags, provider);
   const ctx = createContext(goal, resolveSerializable(config));
-  process.stdout.write(`\n  ${dim("run")} ${mag(ctx.runId)}  ${dim(args.flags["tools"] === "fs" ? "(fs tools on)" : "(no tools — pure reasoning)")}\n\n`);
+  ctx.meta["cli"] = invocationOf(args.flags); // so `resume` can rebuild this same agent
+  const runsDir = runsDirOf(args.flags);
+  const freshDir = !existsSync(runsDir); // the store creates it (self-ignoring) on the first checkpoint
+  process.stdout.write(`\n  ${dim("run")} ${mag(ctx.runId)}  ${dim(args.flags["tools"] === "fs" ? "(fs tools on)" : "(no tools — pure reasoning)")}\n`);
+  if (freshDir) process.stdout.write(`  ${dim(`checkpoints → ${runsDir}/  (created here, and git-ignored)`)}\n`);
+  process.stdout.write("\n");
   try {
     const result = await runWith(ctx, config);
     process.stdout.write(`\n  ${bold(result.status === "done" ? green("finished") : yellow(result.status))}  ${dim(`· ${result.ctx.budget.steps} steps · resume with:`)} ${cyan(`oh-my-fable resume ${ctx.runId}`)}\n\n`);
     process.exit(result.status === "done" ? 0 : 1);
   } catch (err) {
-    process.stdout.write(`\n  ${red("crashed")} ${dim("— " + (err as Error).message)}\n  ${dim("resume from the last checkpoint:")} ${cyan(`oh-my-fable resume ${ctx.runId}`)}\n\n`);
+    // Only point at `resume` if there is actually something to resume from: a
+    // run that died before its first checkpoint (bad flag, missing CLI, no key)
+    // has nothing on disk, and sending the user there is a dead end.
+    const checkpointed = config.store ? await config.store.load(ctx.runId).catch(() => null) : null;
+    const next = checkpointed
+      ? `\n  ${dim("resume from the last checkpoint:")} ${cyan(`oh-my-fable resume ${ctx.runId}`)}`
+      : `\n  ${dim("nothing was checkpointed yet — fix the above and run it again.")}`;
+    process.stdout.write(`\n  ${red("crashed")} ${dim("— " + (err as Error).message)}${next}\n\n`);
     process.exit(1);
   }
 }
@@ -152,24 +179,32 @@ async function cmdRun(args: Args): Promise<void> {
 async function cmdResume(args: Args): Promise<void> {
   const runId = args._[0];
   if (!runId) fail("Give a run id: oh-my-fable resume <runId>   (see `oh-my-fable list`)");
-  const provider = makeProvider(args.flags);
-  process.stdout.write(`\n  ${dim("resuming")} ${mag(runId)}\n\n`);
-  const result = await resume(runId, commonConfig(args.flags, provider));
+  const store = new FileStore(runsDirOf(args.flags));
+  const ctx = await store.load(runId);
+  if (!ctx) fail(`No saved run found for "${runId}".   (see \`oh-my-fable list\`)`);
+  // Resume as the SAME agent: the provider and tools the run started with are
+  // read back from the checkpoint. Flags typed now override them.
+  const flags = withRemembered(ctx, args.flags);
+  const provider = makeProvider(flags);
+  ctx.meta["cli"] = invocationOf(flags); // remember any override for the next resume
+  const as = describeInvocation(ctx.meta["cli"] as Invocation);
+  process.stdout.write(`\n  ${dim("resuming")} ${mag(runId)}${as ? dim(`  (${as})`) : ""}\n\n`);
+  const result = await runWith(ctx, { ...commonConfig(flags, provider), store });
   process.stdout.write(`\n  ${bold(result.status === "done" ? green("finished") : yellow(result.status))}\n\n`);
   process.exit(result.status === "done" ? 0 : 1);
 }
 
 async function cmdList(args: Args): Promise<void> {
-  const store = new FileStore(typeof args.flags["runs-dir"] === "string" ? (args.flags["runs-dir"] as string) : "runs");
+  const store = new FileStore(runsDirOf(args.flags));
   const runs = await store.list();
   if (runs.length === 0) {
-    process.stdout.write("\n  no saved runs.\n\n");
+    process.stdout.write(`\n  no saved runs in ${runsDirOf(args.flags)}/.\n\n`);
     return;
   }
   process.stdout.write("\n");
   for (const r of runs) {
     const st = r.planStatus === "done" ? green("done ") : r.planStatus === "failed" ? red("failed") : yellow("active");
-    process.stdout.write(`  ${st}  ${mag(r.runId)}  ${dim(r.updatedAt.slice(0, 16).replace("T", " "))}  ${r.goal.slice(0, 60)}\n`);
+    process.stdout.write(`  ${st}  ${mag(r.runId)}  ${dim(localTime(r.updatedAt))}  ${r.goal.slice(0, 60)}\n`);
   }
   process.stdout.write("\n");
 }
@@ -177,7 +212,7 @@ async function cmdList(args: Args): Promise<void> {
 async function cmdShow(args: Args): Promise<void> {
   const runId = args._[0];
   if (!runId) fail("Give a run id: oh-my-fable show <runId>   (see `oh-my-fable list`)");
-  const store = new FileStore(typeof args.flags["runs-dir"] === "string" ? (args.flags["runs-dir"] as string) : "runs");
+  const store = new FileStore(runsDirOf(args.flags));
   const ctx = await store.load(runId);
   if (!ctx) fail(`no run ${runId} — try \`oh-my-fable list\``);
 

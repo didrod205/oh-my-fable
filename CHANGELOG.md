@@ -4,6 +4,37 @@ All notable changes to oh-my-fable are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`resume <runId>` now comes back as the same agent.** The provider and
+  toolset a run started with are recorded in its checkpoint (`meta.cli`) and
+  restored on resume; flags typed on the resume command still win. Previously a
+  bare `resume` — the command the CLI itself prints after a crash — rebuilt the
+  *default* Anthropic provider, so any run started with `--provider claude`,
+  `--provider ollama` or `--base-url` died on a missing API key. Worse,
+  `--tools fs` was dropped in silence: the run continued with no tools at all
+  and still reported `done`. `--api-key` is deliberately not recorded — a
+  checkpoint is a file on disk, not a secret store. Checkpoints written by
+  earlier versions carry no record and behave exactly as before.
+- **The crash hint no longer points at a checkpoint that does not exist.** A run
+  that dies before its first checkpoint (missing CLI, bad flag, no API key) now
+  says so instead of suggesting `oh-my-fable resume <runId>`, which could only
+  answer "No saved run found".
+- **`list` shows timestamps on your own clock.** It printed the stored ISO
+  string, which is UTC, with nothing to say so — a run started at 15:01 local
+  was listed as `06:01`.
+
+### Changed
+
+- **The `runs/` directory the store creates now ignores itself.** A checkpoint
+  carries the run's whole history, including whatever the tools read out of
+  your files; running an agent inside a repo used to leave that sitting in
+  `git status`. A directory the store creates gets a `.gitignore` containing
+  `*`, and the CLI says where checkpoints went on the run that creates it. A
+  directory you made yourself is never touched.
+
 ## [0.4.0] — 2026-07-08
 
 ### Added

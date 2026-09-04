@@ -55,7 +55,7 @@ engine is whatever `Provider` you hand it (Anthropic, OpenAI-compatible, local, 
 ```ts
 const result = await run(goal, { provider, store });   // crashes at step 2
 // ...process restarts...
-await resume(result.runId, { provider, store });        // finishes from step 2
+await resume(result.ctx.runId, { provider, store });    // finishes from step 2
 ```
 
 That's `examples/scripted-run.mjs` — run it with `npm run example`, no API key needed.

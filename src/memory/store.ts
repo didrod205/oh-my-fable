@@ -12,7 +12,14 @@ export class FileStore implements Store {
   constructor(private readonly dir = "runs") {}
 
   private async ensureDir(): Promise<void> {
-    if (!existsSync(this.dir)) await mkdir(this.dir, { recursive: true });
+    if (existsSync(this.dir)) return;
+    await mkdir(this.dir, { recursive: true });
+    // A checkpoint carries the run's entire history — including whatever the
+    // tools read out of the user's files. Make the directory we just created
+    // ignore itself, so running an agent inside a repo can't quietly stage it
+    // for commit. Only ever written for a directory we create; an existing one
+    // is left exactly as the user set it up.
+    await writeFile(join(this.dir, ".gitignore"), "*\n", "utf8").catch(() => {});
   }
 
   private path(runId: string): string {

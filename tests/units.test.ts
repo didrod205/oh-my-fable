@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -104,6 +104,45 @@ describe("FileStore round-trips RunContext", () => {
       expect(list[0]!.goal).toBe("persist me");
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("makes a directory it creates ignore itself", async () => {
+    // A checkpoint holds the whole history, tool output included. Running an
+    // agent inside a repo must not quietly stage that for commit.
+    const base = mkdtempSync(join(tmpdir(), "af-"));
+    try {
+      const dir = join(base, "runs"); // does not exist yet — the store creates it
+      const store = new FileStore(dir);
+      await store.save(createContext({ description: "g" }, resolveSerializable({})));
+      expect(readFileSync(join(dir, ".gitignore"), "utf8")).toBe("*\n");
+      expect((await store.list()).length).toBe(1); // the marker is not mistaken for a run
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves a directory the user already set up exactly as it was", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "af-")); // pre-existing
+    try {
+      writeFileSync(join(dir, "NOTES.md"), "mine\n", "utf8");
+      await new FileStore(dir).save(createContext({ description: "g" }, resolveSerializable({})));
+      expect(existsSync(join(dir, ".gitignore"))).toBe(false);
+      expect(readFileSync(join(dir, "NOTES.md"), "utf8")).toBe("mine\n");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still creates nested directories that do not exist", async () => {
+    const base = mkdtempSync(join(tmpdir(), "af-"));
+    try {
+      const store = new FileStore(join(base, "a", "b", "runs"));
+      const ctx = createContext({ description: "deep" }, resolveSerializable({}));
+      await store.save(ctx);
+      expect((await store.load(ctx.runId))!.runId).toBe(ctx.runId);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
     }
   });
 });
