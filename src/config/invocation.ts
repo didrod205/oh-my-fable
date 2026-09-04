@@ -44,3 +44,17 @@ export function describeInvocation(inv: Invocation): string {
   if (inv["tools"] === "fs") bits.push("--tools fs");
   return bits.join(" ");
 }
+
+/**
+ * A budget flag that is not a positive number must stop the run, not disable
+ * the budget. `Number("abc")` is NaN, every `used >= NaN` comparison is false,
+ * and the ceiling that exists to stop a runaway quietly stops existing.
+ *
+ * Throws rather than exiting so the caller decides how to report it.
+ */
+export function positiveFlag(v: string | boolean | undefined, name: string): number | undefined {
+  if (v === undefined) return undefined;
+  const n = typeof v === "string" ? Number(v) : NaN;
+  if (!Number.isFinite(n) || n <= 0) throw new Error(`--${name} needs a positive number, got "${String(v)}".`);
+  return n;
+}

@@ -10,7 +10,16 @@ import { OpenAICompatProvider, ollama } from "./providers/openai.js";
 import { claudeCode, codexCli } from "./providers/cli.js";
 import { ScriptedProvider, reply } from "./providers/provider.js";
 import type { RunEvent, Goal, RunConfig, Provider } from "./core/types.js";
-import { invocationOf, withRemembered, describeInvocation, type Invocation } from "./config/invocation.js";
+import { invocationOf, withRemembered, describeInvocation, positiveFlag, type Invocation } from "./config/invocation.js";
+
+/** `positiveFlag`, reported the way the CLI reports every other usage error. */
+function budget(v: string | boolean | undefined, name: string): number | undefined {
+  try {
+    return positiveFlag(v, name);
+  } catch (err) {
+    fail((err as Error).message);
+  }
+}
 
 const VERSION = "0.4.1";
 
@@ -137,8 +146,8 @@ function commonConfig(flags: Args["flags"], provider: Provider): RunConfig {
     store: new FileStore(runsDirOf(flags)),
     tools,
     onEvent: flags["quiet"] ? undefined : renderer(),
-    maxSteps: flags["max-steps"] ? Number(flags["max-steps"]) : undefined,
-    maxTokens: flags["max-tokens"] ? Number(flags["max-tokens"]) : undefined,
+    maxSteps: budget(flags["max-steps"], "max-steps"),
+    maxTokens: budget(flags["max-tokens"], "max-tokens"),
   };
 }
 

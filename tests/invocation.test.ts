@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileStore, createContext, resolveSerializable } from "../src/index.js";
-import { invocationOf, withRemembered, describeInvocation } from "../src/config/invocation.js";
+import { invocationOf, withRemembered, describeInvocation, positiveFlag } from "../src/config/invocation.js";
 import type { RunContext } from "../src/core/types.js";
 
 const ctxWith = (cli?: unknown): RunContext => {
@@ -61,5 +61,21 @@ describe("resume brings back the same agent", () => {
     expect(describeInvocation({ provider: "claude", "cli-tools": true })).toBe("claude --cli-tools");
     expect(describeInvocation({ "base-url": "http://h/v1", model: "m", tools: "fs" })).toBe("http://h/v1 m --tools fs");
     expect(describeInvocation({})).toBe("");
+  });
+});
+
+describe("budget flags", () => {
+  it("refuses a value that is not a positive number", () => {
+    // Number("abc") is NaN, and `used >= NaN` is false forever — a typo used to
+    // remove the runaway ceiling instead of rejecting the command.
+    for (const bad of ["abc", "0", "-5", "", true as const]) {
+      expect(() => positiveFlag(bad, "max-steps")).toThrow(/positive number/);
+    }
+  });
+
+  it("passes a real budget through, and leaves an absent flag absent", () => {
+    expect(positiveFlag("50", "max-steps")).toBe(50);
+    expect(positiveFlag("2000000", "max-tokens")).toBe(2_000_000);
+    expect(positiveFlag(undefined, "max-steps")).toBeUndefined();
   });
 });
