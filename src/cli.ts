@@ -10,7 +10,16 @@ import { OpenAICompatProvider, ollama } from "./providers/openai.js";
 import { claudeCode, codexCli } from "./providers/cli.js";
 import { ScriptedProvider, reply } from "./providers/provider.js";
 import type { RunEvent, Goal, RunConfig, Provider } from "./core/types.js";
-import { invocationOf, withRemembered, describeInvocation, type Invocation } from "./config/invocation.js";
+import { invocationOf, withRemembered, describeInvocation, restoredPermissions, positiveFlag, handsLabel, type Invocation } from "./config/invocation.js";
+
+/** `positiveFlag`, reported the way the CLI reports every other usage error. */
+function budget(v: string | boolean | undefined, name: string): number | undefined {
+  try {
+    return positiveFlag(v, name);
+  } catch (err) {
+    fail((err as Error).message);
+  }
+}
 
 const VERSION = "0.4.1";
 
@@ -104,7 +113,14 @@ function makeProvider(flags: Args["flags"]): Provider {
   const toolsOpt = allowList ?? (cliTools ? true : undefined);
   try {
     if (provider === "claude" || provider === "claude-code") return claudeCode({ model, tools: toolsOpt, permissionMode });
-    if (provider === "codex") return codexCli({ model, tools: cliTools || !!allowList });
+    if (provider === "codex") {
+      // `codex exec` has no per-tool allowlist — only a sandbox and an approval
+      // policy. Treating --allow as "tools on" turned a request to NARROW access
+      // into workspace-write with approvals never, which is the opposite of what
+      // the operator typed. Say it is unsupported rather than widening silently.
+      if (allowList) fail("--allow is a claude-only flag; codex has no per-tool allowlist.\n  For codex tool access use --cli-tools (workspace-write, approvals off).");
+      return codexCli({ model, tools: cliTools });
+    }
     if (provider === "ollama") return ollama(model ?? "llama3.1", baseUrl ? { baseUrl } : {});
     if (provider === "openai") {
       return new OpenAICompatProvider({ baseUrl: baseUrl ?? "https://api.openai.com/v1", apiKey: apiKey ?? process.env["OPENAI_API_KEY"], model: model ?? "gpt-4o-mini", label: "openai" });
@@ -137,8 +153,8 @@ function commonConfig(flags: Args["flags"], provider: Provider): RunConfig {
     store: new FileStore(runsDirOf(flags)),
     tools,
     onEvent: flags["quiet"] ? undefined : renderer(),
-    maxSteps: flags["max-steps"] ? Number(flags["max-steps"]) : undefined,
-    maxTokens: flags["max-tokens"] ? Number(flags["max-tokens"]) : undefined,
+    maxSteps: budget(flags["max-steps"], "max-steps"),
+    maxTokens: budget(flags["max-tokens"], "max-tokens"),
   };
 }
 
@@ -156,7 +172,7 @@ async function cmdRun(args: Args): Promise<void> {
   ctx.meta["cli"] = invocationOf(args.flags); // so `resume` can rebuild this same agent
   const runsDir = runsDirOf(args.flags);
   const freshDir = !existsSync(runsDir); // the store creates it (self-ignoring) on the first checkpoint
-  process.stdout.write(`\n  ${dim("run")} ${mag(ctx.runId)}  ${dim(args.flags["tools"] === "fs" ? "(fs tools on)" : "(no tools — pure reasoning)")}\n`);
+  process.stdout.write(`\n  ${dim("run")} ${mag(ctx.runId)}  ${dim(handsLabel(args.flags))}\n`);
   if (freshDir) process.stdout.write(`  ${dim(`checkpoints → ${runsDir}/  (created here, and git-ignored)`)}\n`);
   process.stdout.write("\n");
   try {
@@ -184,11 +200,20 @@ async function cmdResume(args: Args): Promise<void> {
   if (!ctx) fail(`No saved run found for "${runId}".   (see \`oh-my-fable list\`)`);
   // Resume as the SAME agent: the provider and tools the run started with are
   // read back from the checkpoint. Flags typed now override them.
+  const granted = restoredPermissions(ctx, args.flags);
   const flags = withRemembered(ctx, args.flags);
   const provider = makeProvider(flags);
   ctx.meta["cli"] = invocationOf(flags); // remember any override for the next resume
   const as = describeInvocation(ctx.meta["cli"] as Invocation);
-  process.stdout.write(`\n  ${dim("resuming")} ${mag(runId)}${as ? dim(`  (${as})`) : ""}\n\n`);
+  process.stdout.write(`\n  ${dim("resuming")} ${mag(runId)}${as ? dim(`  (${as})`) : ""}\n`);
+  // Tool access restored from a file on disk, not from this command line: say so.
+  if (granted.length) {
+    process.stdout.write(
+      `  ${yellow("!")} ${dim(`tool access (${granted.map((g) => "--" + g).join(", ")}) came from the checkpoint, not this command`)}\n` +
+        `    ${dim(`re-run with the flags you want to pin them, or inspect ${runsDirOf(args.flags)}/${runId}.json`)}\n`,
+    );
+  }
+  process.stdout.write("\n");
   const result = await runWith(ctx, { ...commonConfig(flags, provider), store });
   process.stdout.write(`\n  ${bold(result.status === "done" ? green("finished") : yellow(result.status))}\n\n`);
   process.exit(result.status === "done" ? 0 : 1);

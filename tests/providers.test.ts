@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { OpenAICompatProvider, ollama, CliProvider } from "../src/index.js";
+import { OpenAICompatProvider, ollama, CliProvider, defineTool } from "../src/index.js";
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -85,5 +85,80 @@ describe("ollama() helper — local, no key", () => {
     await ollama("llama3.1").complete({ messages: [{ role: "user", content: "hi" }] });
     expect(calls[0]!.url).toBe("http://localhost:11434/v1/chat/completions");
     expect((calls[0]!.init.headers as Record<string, string>)["authorization"]).toBeUndefined();
+  });
+});
+
+describe("CliProvider — harness tools over the text protocol", () => {
+  const finding = defineTool(
+    "record_finding",
+    "Record one audit finding.",
+    { type: "object", properties: { title: { type: "string" } }, required: ["title"] },
+    async () => ({ ok: true, output: "recorded" }),
+  );
+  // Echoes whether the tool manifest reached it, and answers in the protocol.
+  const script =
+    'const c=process.argv[process.argv.length-1];' +
+    'if(c.includes("record_finding")) process.stdout.write(JSON.stringify({"oh-my-fable:tool_calls":[{name:"record_finding",input:{title:"hardcoded key"}}]}));' +
+    'else process.stdout.write("no tools were offered");';
+  const provider = () => new CliProvider({ command: process.execPath, args: ["-e", script], promptVia: "arg" });
+
+  it("tells an agentic CLI which tools it has", async () => {
+    // Without this the model is never told the tools exist and invents a
+    // workaround, so the run completes having called nothing.
+    const r = await provider().complete({ messages: [{ role: "user", content: "audit" }], tools: [finding.schema] });
+    expect(r.stopReason).toBe("tool_use");
+    expect(r.toolCalls?.[0]).toMatchObject({ name: "record_finding", input: { title: "hardcoded key" } });
+    expect(r.toolCalls?.[0]!.id).toBeTruthy();
+  });
+
+  it("leaves a request with no tools exactly as it was", async () => {
+    const r = await provider().complete({ messages: [{ role: "user", content: "audit" }] });
+    expect(r.content).toBe("no tools were offered");
+    expect(r.stopReason).toBe("end");
+    expect(r.toolCalls).toBeUndefined();
+  });
+
+  it("salvages the complete calls when the answer was cut off mid-object", async () => {
+    // A token cap can cut a CLI answer mid-object, which leaves the whole block
+    // unparseable. Dropping it loses the calls that WERE complete: the model
+    // does the work, nothing is recorded, and the run still reports success.
+    const full = JSON.stringify({
+      "oh-my-fable:tool_calls": [
+        { name: "record_finding", input: { title: "first", evidence: "a { brace inside a string" } },
+        { name: "record_finding", input: { title: "second" } },
+      ],
+    });
+    const cut = full.slice(0, full.length - 30);
+    const p = new CliProvider({
+      command: process.execPath,
+      args: ["-e", `process.stdout.write(${JSON.stringify(cut)})`],
+      promptVia: "arg",
+    });
+    const r = await p.complete({ messages: [{ role: "user", content: "audit" }], tools: [finding.schema] });
+    expect(r.stopReason).toBe("tool_use");
+    expect(r.toolCalls).toHaveLength(1);
+    expect(r.toolCalls?.[0]!.input).toMatchObject({ title: "first" });
+  });
+
+  it("falls back to text when nothing complete survives the truncation", async () => {
+    const p = new CliProvider({
+      command: process.execPath,
+      args: ["-e", 'process.stdout.write(\'{"oh-my-fable:tool_calls":[{"name":"rec\')'],
+      promptVia: "arg",
+    });
+    const r = await p.complete({ messages: [{ role: "user", content: "audit" }], tools: [finding.schema] });
+    expect(r.stopReason).toBe("end");
+    expect(r.toolCalls).toBeUndefined();
+  });
+
+  it("does not mistake ordinary prose for a tool call", async () => {
+    const chatty = new CliProvider({
+      command: process.execPath,
+      args: ["-e", 'process.stdout.write("I looked and found nothing worth recording.")'],
+      promptVia: "arg",
+    });
+    const r = await chatty.complete({ messages: [{ role: "user", content: "audit" }], tools: [finding.schema] });
+    expect(r.stopReason).toBe("end");
+    expect(r.toolCalls).toBeUndefined();
   });
 });

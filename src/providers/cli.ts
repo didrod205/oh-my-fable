@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
-import type { Provider, CompletionRequest, CompletionResult, Message } from "../core/types.js";
+import type { Provider, CompletionRequest, CompletionResult, Message, ToolCall, ToolSchema } from "../core/types.js";
 import { estimateTokens } from "./provider.js";
+import { extractJson, tryParse } from "../core/json.js";
 
 export interface CliProviderOptions {
   /** The executable, e.g. "claude" or "codex". */
@@ -35,6 +36,111 @@ function flatten(messages: Message[], includeSystem: boolean): string {
   return parts.join("\n\n");
 }
 
+// ── harness tools over a text protocol ───────────────────────────────────────
+// An agentic CLI has no tools API to hand a schema to, so the tools the harness
+// owns have to travel in the prompt and come back out of the text. Without this
+// a CLI provider silently ignores `tools`: the model is never told they exist,
+// invents a workaround, and the run quietly produces nothing.
+
+const TOOL_SENTINEL = "oh-my-fable:tool_calls";
+
+function toolManifest(tools: ToolSchema[]): string {
+  const list = tools
+    .map((t) => `- ${t.name}: ${t.description}\n  input schema: ${JSON.stringify(t.parameters)}`)
+    .join("\n");
+  return (
+    `\n\n## Tools available to you\n\n${list}\n\n` +
+    `To call one or more of them, reply with ONLY this JSON and nothing else:\n` +
+    `{"${TOOL_SENTINEL}": [{"name": "<tool>", "input": { ... }}]}\n` +
+    `You will be given the results and can then continue. When you are done and ` +
+    `no longer need a tool, reply normally with your answer instead.`
+  );
+}
+
+/**
+ * Every complete `{...}` object in `s`, skipping any trailing one that is cut
+ * off. Quotes and escapes are tracked so a brace inside a string is not counted.
+ */
+function completeObjects(s: string): string[] {
+  const out: string[] = [];
+  let depth = 0, start = -1, inStr = false, esc = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!;
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === "{") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (c === "}") {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        out.push(s.slice(start, i + 1));
+        start = -1;
+      }
+    }
+  }
+  return out;
+}
+
+function asCall(entry: unknown, i: number): ToolCall | null {
+  const e = entry as { name?: unknown; input?: unknown };
+  if (typeof e?.name !== "string") return null;
+  return { id: `cli_${Date.now().toString(36)}_${i}`, name: e.name, input: e.input ?? {} };
+}
+
+/**
+ * Read back a tool-call block the model emitted, if it emitted one.
+ *
+ * A CLI answer can be cut off by a token cap mid-object, which leaves the whole
+ * block unparseable. Dropping it silently loses the calls that WERE complete —
+ * the model does the work, the harness records nothing, and the run reports
+ * success. So fall back to salvaging every intact object out of the wreckage.
+ */
+function parseTextToolCalls(content: string): ToolCall[] | null {
+  if (!content.includes(TOOL_SENTINEL)) return null;
+  const block = extractJson(content);
+
+  const parsed = tryParse<Record<string, unknown>>(block);
+  const raw = parsed?.[TOOL_SENTINEL];
+  if (Array.isArray(raw)) {
+    const calls = raw.map(asCall).filter((c): c is ToolCall => c !== null);
+    return calls.length ? calls : null;
+  }
+
+  // Truncated: take the complete entries that survive. Start scanning at the
+  // array bracket, not right after the sentinel — the character following it is
+  // the key's own closing quote, which would flip the scanner into "in string"
+  // and make it read every brace after that as text.
+  const arrayStart = block.indexOf("[", block.indexOf(TOOL_SENTINEL));
+  if (arrayStart === -1) return null;
+  const salvaged = completeObjects(block.slice(arrayStart))
+    .map((o) => asCall(tryParse<unknown>(o), 0))
+    .filter((c): c is ToolCall => c !== null)
+    .map((c, i) => ({ ...c, id: `${c.id}_${i}` }));
+  return salvaged.length ? salvaged : null;
+}
+
+/**
+ * A missing CLI is the most common first failure, and "not on your PATH" alone
+ * is a dead end — say what to do about it. The desktop Claude Code app in
+ * particular is a paid install whose binary never lands on PATH.
+ */
+function notFound(command: string): string {
+  const base = `"${command}" is not installed or not on your PATH.`;
+  if (!/(^|\/)claude$/.test(command)) return base;
+  return (
+    base +
+    "\n  If you use the Claude Code desktop app, its binary is inside the .app bundle:" +
+    "\n    OMF_CLAUDE_BIN=\"$CLAUDE_CODE_EXECPATH\" oh-my-fable run ... --provider claude" +
+    "\n  Otherwise install the CLI:  npm i -g @anthropic-ai/claude-code  (then `claude` and /login)"
+  );
+}
+
 function runCli(command: string, args: string[], input: string | null, timeoutMs: number, env?: Record<string, string>): Promise<string> {
   return new Promise((resolve, reject) => {
     let child;
@@ -53,7 +159,7 @@ function runCli(command: string, args: string[], input: string | null, timeoutMs
     child.stderr!.on("data", (d) => (err += d));
     child.on("error", (e) => {
       clearTimeout(timer);
-      reject((e as NodeJS.ErrnoException).code === "ENOENT" ? new Error(`"${command}" is not installed or not on your PATH.`) : e);
+      reject((e as NodeJS.ErrnoException).code === "ENOENT" ? new Error(notFound(command)) : e);
     });
     child.on("close", (code) => {
       clearTimeout(timer);
@@ -103,7 +209,9 @@ export class CliProvider implements Provider {
   }
 
   async complete(req: CompletionRequest): Promise<CompletionResult> {
-    const prompt = flatten(req.messages, this.systemInPrompt);
+    // Tools the harness owns only reach an agentic CLI through the prompt.
+    const harnessTools = req.tools ?? [];
+    const prompt = flatten(req.messages, this.systemInPrompt) + (harnessTools.length ? toolManifest(harnessTools) : "");
     const reqArgs = this.requestArgs ? this.requestArgs(req) : [];
     const argv = [...this.args, ...this.extraArgs, ...reqArgs];
     const finalArgs = this.promptVia === "arg" ? [...argv, prompt] : argv;
@@ -112,23 +220,27 @@ export class CliProvider implements Provider {
     if (this.parseResult) {
       const r = this.parseResult(stdout);
       const content = r.content ?? "";
+      const textCalls = harnessTools.length && !r.toolCalls?.length ? parseTextToolCalls(content) : null;
+      const toolCalls = r.toolCalls?.length ? r.toolCalls : (textCalls ?? undefined);
       return {
         content,
-        toolCalls: r.toolCalls,
+        toolCalls,
         tokensIn: r.tokensIn ?? estimateTokens(req.messages),
         tokensOut: r.tokensOut ?? Math.ceil(content.length / 4),
-        stopReason: r.stopReason ?? "end",
+        stopReason: toolCalls?.length ? "tool_use" : (r.stopReason ?? "end"),
         sessionId: r.sessionId,
         costUsd: r.costUsd,
       };
     }
 
     const content = this.parse(stdout);
+    const toolCalls = harnessTools.length ? (parseTextToolCalls(content) ?? undefined) : undefined;
     return {
       content,
+      toolCalls,
       tokensIn: estimateTokens(req.messages),
       tokensOut: Math.ceil(content.length / 4),
-      stopReason: "end",
+      stopReason: toolCalls?.length ? "tool_use" : "end",
     };
   }
 }
@@ -211,9 +323,26 @@ export interface ClaudeCodeOptions {
   addDirs?: string[];
   /** Continue a prior `claude` session id (`--resume`) — preserves its context + cache. */
   resumeSessionId?: string;
+  /**
+   * Path to the `claude` binary. Defaults to whatever resolution order
+   * {@link resolveClaudeCommand} uses — needed when Claude Code is installed as
+   * the desktop app, whose binary lives inside the .app bundle and is not on PATH.
+   */
+  command?: string;
   timeoutMs?: number;
   env?: Record<string, string>;
   label?: string;
+}
+
+/**
+ * Find the `claude` binary. Paying for Claude Code does not guarantee a `claude`
+ * on PATH: the desktop app ships its own binary inside the .app bundle, and
+ * exports its location as CLAUDE_CODE_EXECPATH. Look there before giving up.
+ *
+ * Order: explicit argument → OMF_CLAUDE_BIN → CLAUDE_CODE_EXECPATH → "claude".
+ */
+export function resolveClaudeCommand(explicit?: string): string {
+  return explicit || process.env["OMF_CLAUDE_BIN"] || process.env["CLAUDE_CODE_EXECPATH"] || "claude";
 }
 
 /** Claude Code in print mode — uses your existing `claude` auth (subscription or key). */
@@ -231,7 +360,7 @@ export function claudeCode(opts: ClaudeCodeOptions = {}): CliProvider {
   for (const d of opts.addDirs ?? []) extra.push("--add-dir", d);
   if (opts.resumeSessionId) extra.push("--resume", opts.resumeSessionId);
   return new CliProvider({
-    command: "claude",
+    command: resolveClaudeCommand(opts.command),
     args: ["-p"],
     promptVia: "arg",
     label: "claude-code",

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileStore, createContext, resolveSerializable } from "../src/index.js";
-import { invocationOf, withRemembered, describeInvocation } from "../src/config/invocation.js";
+import { invocationOf, withRemembered, describeInvocation, positiveFlag, restoredPermissions, handsLabel } from "../src/config/invocation.js";
 import type { RunContext } from "../src/core/types.js";
 
 const ctxWith = (cli?: unknown): RunContext => {
@@ -61,5 +61,54 @@ describe("resume brings back the same agent", () => {
     expect(describeInvocation({ provider: "claude", "cli-tools": true })).toBe("claude --cli-tools");
     expect(describeInvocation({ "base-url": "http://h/v1", model: "m", tools: "fs" })).toBe("http://h/v1 m --tools fs");
     expect(describeInvocation({})).toBe("");
+  });
+});
+
+describe("budget flags", () => {
+  it("refuses a value that is not a positive number", () => {
+    // Number("abc") is NaN, and `used >= NaN` is false forever — a typo used to
+    // remove the runaway ceiling instead of rejecting the command.
+    for (const bad of ["abc", "0", "-5", "", true as const]) {
+      expect(() => positiveFlag(bad, "max-steps")).toThrow(/positive number/);
+    }
+  });
+
+  it("passes a real budget through, and leaves an absent flag absent", () => {
+    expect(positiveFlag("50", "max-steps")).toBe(50);
+    expect(positiveFlag("2000000", "max-tokens")).toBe(2_000_000);
+    expect(positiveFlag(undefined, "max-steps")).toBeUndefined();
+  });
+});
+
+describe("tool access restored from a checkpoint", () => {
+  // The checkpoint is an ordinary file in the user's runs directory. Restoring
+  // the agent from it is the point — but whoever can write there decides what a
+  // later resume runs and under which permission mode, so it must not be quiet.
+  it("names the permission flags that came from the file", () => {
+    const ctx = ctxWith({ provider: "claude", "cli-tools": true, "permission-mode": "dontAsk" });
+    expect(restoredPermissions(ctx, {})).toEqual(["cli-tools", "permission-mode"]);
+  });
+
+  it("stays quiet when the operator typed those flags themselves", () => {
+    const ctx = ctxWith({ provider: "claude", "cli-tools": true, "permission-mode": "dontAsk" });
+    expect(restoredPermissions(ctx, { "cli-tools": true, "permission-mode": "acceptEdits" })).toEqual([]);
+  });
+
+  it("does not flag a restored provider that grants nothing", () => {
+    expect(restoredPermissions(ctxWith({ provider: "ollama", model: "llama3.1" }), {})).toEqual([]);
+  });
+});
+
+describe("what the run says the agent can touch", () => {
+  it("never claims pure reasoning while the CLI holds its own tools", () => {
+    expect(handsLabel({ "cli-tools": true })).toBe("(the CLI runs its own tools — acceptEdits)");
+    expect(handsLabel({ "cli-tools": true, "permission-mode": "dontAsk" })).toBe("(the CLI runs its own tools — dontAsk)");
+    expect(handsLabel({ allow: "Read,Edit" })).toMatch(/runs its own tools/);
+  });
+
+  it("still distinguishes harness tools from no tools at all", () => {
+    expect(handsLabel({ tools: "fs" })).toBe("(fs tools on)");
+    expect(handsLabel({})).toBe("(no tools — pure reasoning)");
+    expect(handsLabel({ provider: "ollama" })).toBe("(no tools — pure reasoning)");
   });
 });
