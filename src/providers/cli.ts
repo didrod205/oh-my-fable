@@ -35,6 +35,22 @@ function flatten(messages: Message[], includeSystem: boolean): string {
   return parts.join("\n\n");
 }
 
+/**
+ * A missing CLI is the most common first failure, and "not on your PATH" alone
+ * is a dead end — say what to do about it. The desktop Claude Code app in
+ * particular is a paid install whose binary never lands on PATH.
+ */
+function notFound(command: string): string {
+  const base = `"${command}" is not installed or not on your PATH.`;
+  if (!/(^|\/)claude$/.test(command)) return base;
+  return (
+    base +
+    "\n  If you use the Claude Code desktop app, its binary is inside the .app bundle:" +
+    "\n    OMF_CLAUDE_BIN=\"$CLAUDE_CODE_EXECPATH\" oh-my-fable run ... --provider claude" +
+    "\n  Otherwise install the CLI:  npm i -g @anthropic-ai/claude-code  (then `claude` and /login)"
+  );
+}
+
 function runCli(command: string, args: string[], input: string | null, timeoutMs: number, env?: Record<string, string>): Promise<string> {
   return new Promise((resolve, reject) => {
     let child;
@@ -53,7 +69,7 @@ function runCli(command: string, args: string[], input: string | null, timeoutMs
     child.stderr!.on("data", (d) => (err += d));
     child.on("error", (e) => {
       clearTimeout(timer);
-      reject((e as NodeJS.ErrnoException).code === "ENOENT" ? new Error(`"${command}" is not installed or not on your PATH.`) : e);
+      reject((e as NodeJS.ErrnoException).code === "ENOENT" ? new Error(notFound(command)) : e);
     });
     child.on("close", (code) => {
       clearTimeout(timer);
@@ -211,9 +227,26 @@ export interface ClaudeCodeOptions {
   addDirs?: string[];
   /** Continue a prior `claude` session id (`--resume`) — preserves its context + cache. */
   resumeSessionId?: string;
+  /**
+   * Path to the `claude` binary. Defaults to whatever resolution order
+   * {@link resolveClaudeCommand} uses — needed when Claude Code is installed as
+   * the desktop app, whose binary lives inside the .app bundle and is not on PATH.
+   */
+  command?: string;
   timeoutMs?: number;
   env?: Record<string, string>;
   label?: string;
+}
+
+/**
+ * Find the `claude` binary. Paying for Claude Code does not guarantee a `claude`
+ * on PATH: the desktop app ships its own binary inside the .app bundle, and
+ * exports its location as CLAUDE_CODE_EXECPATH. Look there before giving up.
+ *
+ * Order: explicit argument → OMF_CLAUDE_BIN → CLAUDE_CODE_EXECPATH → "claude".
+ */
+export function resolveClaudeCommand(explicit?: string): string {
+  return explicit || process.env["OMF_CLAUDE_BIN"] || process.env["CLAUDE_CODE_EXECPATH"] || "claude";
 }
 
 /** Claude Code in print mode — uses your existing `claude` auth (subscription or key). */
@@ -231,7 +264,7 @@ export function claudeCode(opts: ClaudeCodeOptions = {}): CliProvider {
   for (const d of opts.addDirs ?? []) extra.push("--add-dir", d);
   if (opts.resumeSessionId) extra.push("--resume", opts.resumeSessionId);
   return new CliProvider({
-    command: "claude",
+    command: resolveClaudeCommand(opts.command),
     args: ["-p"],
     promptVia: "arg",
     label: "claude-code",
