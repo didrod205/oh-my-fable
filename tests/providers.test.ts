@@ -118,6 +118,39 @@ describe("CliProvider — harness tools over the text protocol", () => {
     expect(r.toolCalls).toBeUndefined();
   });
 
+  it("salvages the complete calls when the answer was cut off mid-object", async () => {
+    // A token cap can cut a CLI answer mid-object, which leaves the whole block
+    // unparseable. Dropping it loses the calls that WERE complete: the model
+    // does the work, nothing is recorded, and the run still reports success.
+    const full = JSON.stringify({
+      "oh-my-fable:tool_calls": [
+        { name: "record_finding", input: { title: "first", evidence: "a { brace inside a string" } },
+        { name: "record_finding", input: { title: "second" } },
+      ],
+    });
+    const cut = full.slice(0, full.length - 30);
+    const p = new CliProvider({
+      command: process.execPath,
+      args: ["-e", `process.stdout.write(${JSON.stringify(cut)})`],
+      promptVia: "arg",
+    });
+    const r = await p.complete({ messages: [{ role: "user", content: "audit" }], tools: [finding.schema] });
+    expect(r.stopReason).toBe("tool_use");
+    expect(r.toolCalls).toHaveLength(1);
+    expect(r.toolCalls?.[0]!.input).toMatchObject({ title: "first" });
+  });
+
+  it("falls back to text when nothing complete survives the truncation", async () => {
+    const p = new CliProvider({
+      command: process.execPath,
+      args: ["-e", 'process.stdout.write(\'{"oh-my-fable:tool_calls":[{"name":"rec\')'],
+      promptVia: "arg",
+    });
+    const r = await p.complete({ messages: [{ role: "user", content: "audit" }], tools: [finding.schema] });
+    expect(r.stopReason).toBe("end");
+    expect(r.toolCalls).toBeUndefined();
+  });
+
   it("does not mistake ordinary prose for a tool call", async () => {
     const chatty = new CliProvider({
       command: process.execPath,

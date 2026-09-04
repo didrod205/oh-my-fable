@@ -57,19 +57,72 @@ function toolManifest(tools: ToolSchema[]): string {
   );
 }
 
-/** Read back a tool-call block the model emitted, if it emitted one. */
+/**
+ * Every complete `{...}` object in `s`, skipping any trailing one that is cut
+ * off. Quotes and escapes are tracked so a brace inside a string is not counted.
+ */
+function completeObjects(s: string): string[] {
+  const out: string[] = [];
+  let depth = 0, start = -1, inStr = false, esc = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!;
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === "{") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (c === "}") {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        out.push(s.slice(start, i + 1));
+        start = -1;
+      }
+    }
+  }
+  return out;
+}
+
+function asCall(entry: unknown, i: number): ToolCall | null {
+  const e = entry as { name?: unknown; input?: unknown };
+  if (typeof e?.name !== "string") return null;
+  return { id: `cli_${Date.now().toString(36)}_${i}`, name: e.name, input: e.input ?? {} };
+}
+
+/**
+ * Read back a tool-call block the model emitted, if it emitted one.
+ *
+ * A CLI answer can be cut off by a token cap mid-object, which leaves the whole
+ * block unparseable. Dropping it silently loses the calls that WERE complete —
+ * the model does the work, the harness records nothing, and the run reports
+ * success. So fall back to salvaging every intact object out of the wreckage.
+ */
 function parseTextToolCalls(content: string): ToolCall[] | null {
   if (!content.includes(TOOL_SENTINEL)) return null;
-  const parsed = tryParse<Record<string, unknown>>(extractJson(content));
+  const block = extractJson(content);
+
+  const parsed = tryParse<Record<string, unknown>>(block);
   const raw = parsed?.[TOOL_SENTINEL];
-  if (!Array.isArray(raw)) return null;
-  const calls: ToolCall[] = [];
-  for (const [i, entry] of raw.entries()) {
-    const e = entry as { name?: unknown; input?: unknown };
-    if (typeof e?.name !== "string") continue;
-    calls.push({ id: `cli_${Date.now().toString(36)}_${i}`, name: e.name, input: e.input ?? {} });
+  if (Array.isArray(raw)) {
+    const calls = raw.map(asCall).filter((c): c is ToolCall => c !== null);
+    return calls.length ? calls : null;
   }
-  return calls.length ? calls : null;
+
+  // Truncated: take the complete entries that survive. Start scanning at the
+  // array bracket, not right after the sentinel — the character following it is
+  // the key's own closing quote, which would flip the scanner into "in string"
+  // and make it read every brace after that as text.
+  const arrayStart = block.indexOf("[", block.indexOf(TOOL_SENTINEL));
+  if (arrayStart === -1) return null;
+  const salvaged = completeObjects(block.slice(arrayStart))
+    .map((o) => asCall(tryParse<unknown>(o), 0))
+    .filter((c): c is ToolCall => c !== null)
+    .map((c, i) => ({ ...c, id: `${c.id}_${i}` }));
+  return salvaged.length ? salvaged : null;
 }
 
 /**
