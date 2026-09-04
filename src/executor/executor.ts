@@ -99,6 +99,13 @@ export class Executor {
       if (ok && result.stopReason === "max_tokens") {
         output += "\n[note: the output hit the step token limit and was truncated]";
       }
+      // Leaving the loop still asking for tools means the hop cap cut the step
+      // off mid-work. stopReason is "tool_use", which passes the `ok` test, so
+      // without this the step is filed as a clean success — usually with no text
+      // at all, since a tool-calling turn carries none.
+      if (ok && result.stopReason === "tool_use" && result.toolCalls?.length) {
+        output += `\n[note: the step was still calling tools when it hit the ${MAX_TOOL_HOPS}-hop limit; its work is unfinished]`;
+      }
 
       // Record the step exchange in history for continuity (kept lean; tools live in the observation).
       ctx.history.push({ role: "user", content: `Step [${step.id}]: ${step.intent}` });

@@ -10,6 +10,8 @@ export interface AnthropicOptions {
   /** anthropic-version header. */
   version?: string;
   maxRetries?: number;
+  /** Deadline for one request. */
+  timeoutMs?: number;
   defaultMaxTokens?: number;
   /**
    * Cache the stable system + tools prefix with `cache_control: ephemeral`.
@@ -125,6 +127,7 @@ export class AnthropicProvider implements Provider {
   private readonly baseUrl: string;
   private readonly version: string;
   private readonly maxRetries: number;
+  private readonly timeoutMs: number;
   private readonly defaultMaxTokens: number;
   private readonly cache: boolean;
   private readonly thinking?: "adaptive";
@@ -137,6 +140,7 @@ export class AnthropicProvider implements Provider {
     this.baseUrl = opts.baseUrl ?? "https://api.anthropic.com";
     this.version = opts.version ?? "2023-06-01";
     this.maxRetries = opts.maxRetries ?? 4;
+    this.timeoutMs = opts.timeoutMs ?? 300_000;
     // Room for adaptive thinking: on Sonnet 5 / Fable-tier models, thinking is
     // on by default and shares the max_tokens budget with the visible output.
     this.defaultMaxTokens = opts.defaultMaxTokens ?? 8192;
@@ -240,6 +244,9 @@ export class AnthropicProvider implements Provider {
           method: "POST",
           headers,
           body: JSON.stringify(body),
+          // Without a deadline a stalled connection hangs the whole run: no step
+          // ever finishes, so no budget is ever consumed to stop it.
+          signal: AbortSignal.timeout(this.timeoutMs),
         });
         if (!res.ok) {
           const text = await res.text().catch(() => "");

@@ -5,7 +5,14 @@ export type { Provider } from "../core/types.js";
 /** chars/4 — deliberately rough; only used to decide when to compact. */
 export function estimateTokens(messages: Message[]): number {
   let chars = 0;
-  for (const m of messages) chars += m.content.length;
+  for (const m of messages) {
+    chars += m.content.length;
+    // Tool arguments and results travel as structured fields, not in `content`.
+    // Counting only the text under-reports a tool-using run by most of its
+    // size, so compaction never triggers and the context overflows instead.
+    for (const c of m.toolCalls ?? []) chars += c.name.length + JSON.stringify(c.input ?? {}).length;
+    for (const r of m.toolResults ?? []) chars += r.output.length;
+  }
   return Math.ceil(chars / 4);
 }
 
