@@ -4,6 +4,38 @@ All notable changes to oh-my-fable are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+Findings from an autonomous audit of this repository, each verified against the
+code before being acted on.
+
+- **A step cut off by the tool-hop limit is no longer filed as a success.**
+  Leaving the loop still asking for tools keeps `stopReason` at `"tool_use"`,
+  which passes the ok test — and a tool-calling turn carries no text, so the
+  step was recorded as a clean success that "produced no text output". The
+  reflector now sees that the work is unfinished.
+- **The `--tools fs` sandbox is actually confined to its root.** The check was
+  lexical, so a symlink inside the root pointing anywhere else passed it and the
+  read followed it straight out. Symlinks are now resolved — for writes too, via
+  the nearest existing parent.
+- **`read_file` says when it truncated.** It cut at 100k characters silently, so
+  the agent reasoned about a partial file as if it had seen all of it.
+- **HTTP provider calls have a deadline.** Neither provider passed a signal to
+  `fetch`, so a stalled connection hung the run forever: no step finished, so no
+  budget was ever consumed to stop it. Both default to 300s, configurable.
+- **An error returned in a 200 body is no longer a successful empty step.** The
+  OpenAI-compatible provider declared the `error` field and never read it; some
+  gateways report failure that way, leaving empty `choices` and blank content.
+- **Token estimates count tool payloads.** Only `content` was measured, so a
+  tool-using run — the case the harness exists for — under-reported by most of
+  its size and compaction never triggered.
+- **An agentic CLI step gets 10 minutes, not 2.** The default SIGKILLed Claude
+  mid-file-read and reported a timeout for a step that was progressing.
+- Writing to a child's stdin can no longer take the harness down with an
+  unhandled EPIPE when that child has already exited.
+
 ## [0.4.2] — 2026-09-04
 
 ### Fixed

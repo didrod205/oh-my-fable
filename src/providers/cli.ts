@@ -166,6 +166,11 @@ function runCli(command: string, args: string[], input: string | null, timeoutMs
       if (code === 0) resolve(out);
       else reject(new Error(`${command} exited ${code}: ${err.trim().slice(0, 300)}`));
     });
+    // A child that exits before reading stdin makes this write emit EPIPE. An
+    // unhandled 'error' on the stream takes the whole process down, turning a
+    // misbehaving CLI into a crash of the harness driving it. The close/error
+    // handlers above already report what actually went wrong.
+    child.stdin!.on("error", () => {});
     if (input !== null) child.stdin!.write(input);
     child.stdin!.end();
   });
@@ -196,7 +201,10 @@ export class CliProvider implements Provider {
     this.promptVia = opts.promptVia ?? "arg";
     this.parse = opts.parse ?? ((s) => s.trim());
     this.env = opts.env;
-    this.timeoutMs = opts.timeoutMs ?? 120_000;
+    // An agentic CLI step is not a chat completion: it reads files, runs tests,
+    // and thinks. Two minutes SIGKILLs it mid-work, and the harness reports a
+    // timeout for a step that was progressing fine.
+    this.timeoutMs = opts.timeoutMs ?? 600_000;
     this.name = opts.label ?? `cli:${opts.command}`;
     this.extraArgs = opts.extraArgs ?? [];
     this.requestArgs = opts.requestArgs;

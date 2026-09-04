@@ -10,6 +10,8 @@ export interface OpenAICompatOptions {
   label?: string;
   maxRetries?: number;
   defaultMaxTokens?: number;
+  /** Deadline for one request. A stalled connection otherwise hangs the run forever. */
+  timeoutMs?: number;
 }
 
 interface OAIToolCall {
@@ -41,6 +43,7 @@ export class OpenAICompatProvider implements Provider {
   private readonly model: string;
   private readonly maxRetries: number;
   private readonly defaultMaxTokens: number;
+  private readonly timeoutMs: number;
 
   constructor(opts: OpenAICompatOptions) {
     if (!opts.baseUrl) throw new Error("OpenAICompatProvider needs a baseUrl.");
@@ -51,6 +54,7 @@ export class OpenAICompatProvider implements Provider {
     this.name = opts.label ?? "openai-compatible";
     this.maxRetries = opts.maxRetries ?? 4;
     this.defaultMaxTokens = opts.defaultMaxTokens ?? 4096;
+    this.timeoutMs = opts.timeoutMs ?? 300_000;
   }
 
   estimateTokens(messages: Message[]): number {
@@ -97,14 +101,27 @@ export class OpenAICompatProvider implements Provider {
       async () => {
         const headers: Record<string, string> = { "content-type": "application/json" };
         if (this.apiKey) headers["authorization"] = `Bearer ${this.apiKey}`;
-        const res = await fetch(`${this.baseUrl}/chat/completions`, { method: "POST", headers, body: JSON.stringify(body) });
+        const res = await fetch(`${this.baseUrl}/chat/completions`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+          // Without a deadline a stalled connection hangs the whole run: no
+          // step ever finishes, so no budget is ever consumed to stop it.
+          signal: AbortSignal.timeout(this.timeoutMs),
+        });
         if (!res.ok) {
           const text = await res.text().catch(() => "");
           const err = new Error(`${this.name} ${res.status}: ${text.slice(0, 300)}`) as Error & { status?: number };
           err.status = res.status;
           throw err;
         }
-        return (await res.json()) as OAIResponse;
+        const json = (await res.json()) as OAIResponse;
+        // Some gateways report failure in a 200 body. Left alone, `choices` is
+        // empty, the content is "", and the step is recorded as a success that
+        // simply produced nothing.
+        if (json.error) throw new Error(`${this.name}: ${json.error.message ?? "error in response body"}`);
+        if (!json.choices?.length) throw new Error(`${this.name}: response contained no choices`);
+        return json;
       },
       {
         retries: this.maxRetries,
