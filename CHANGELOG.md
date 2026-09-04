@@ -4,7 +4,7 @@ All notable changes to oh-my-fable are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.3] — 2026-09-04
 
 ### Fixed
 
@@ -275,6 +275,7 @@ fixed, with tests.
 - Zero runtime dependencies. 20 tests covering crash-resume, replan accumulation,
   self-correction, budgets, tools, and JSON defense.
 
+[0.4.3]: https://github.com/didrod205/oh-my-fable/releases/tag/v0.4.3
 [0.4.2]: https://github.com/didrod205/oh-my-fable/releases/tag/v0.4.2
 [0.4.1]: https://github.com/didrod205/oh-my-fable/releases/tag/v0.4.1
 [0.4.0]: https://github.com/didrod205/oh-my-fable/releases/tag/v0.4.0

@@ -21,7 +21,7 @@ function budget(v: string | boolean | undefined, name: string): number | undefin
   }
 }
 
-const VERSION = "0.4.2";
+const VERSION = "0.4.3";
 
 // ── tiny zero-dep arg + color helpers ────────────────────────────────────────
 const useColor = process.stdout.isTTY && !process.env["NO_COLOR"];
