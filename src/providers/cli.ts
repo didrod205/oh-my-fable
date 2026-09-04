@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
-import type { Provider, CompletionRequest, CompletionResult, Message } from "../core/types.js";
+import type { Provider, CompletionRequest, CompletionResult, Message, ToolCall, ToolSchema } from "../core/types.js";
 import { estimateTokens } from "./provider.js";
+import { extractJson, tryParse } from "../core/json.js";
 
 export interface CliProviderOptions {
   /** The executable, e.g. "claude" or "codex". */
@@ -33,6 +34,42 @@ function flatten(messages: Message[], includeSystem: boolean): string {
     else parts.push(m.content); // system + user read as plain instructions/content
   }
   return parts.join("\n\n");
+}
+
+// ── harness tools over a text protocol ───────────────────────────────────────
+// An agentic CLI has no tools API to hand a schema to, so the tools the harness
+// owns have to travel in the prompt and come back out of the text. Without this
+// a CLI provider silently ignores `tools`: the model is never told they exist,
+// invents a workaround, and the run quietly produces nothing.
+
+const TOOL_SENTINEL = "oh-my-fable:tool_calls";
+
+function toolManifest(tools: ToolSchema[]): string {
+  const list = tools
+    .map((t) => `- ${t.name}: ${t.description}\n  input schema: ${JSON.stringify(t.parameters)}`)
+    .join("\n");
+  return (
+    `\n\n## Tools available to you\n\n${list}\n\n` +
+    `To call one or more of them, reply with ONLY this JSON and nothing else:\n` +
+    `{"${TOOL_SENTINEL}": [{"name": "<tool>", "input": { ... }}]}\n` +
+    `You will be given the results and can then continue. When you are done and ` +
+    `no longer need a tool, reply normally with your answer instead.`
+  );
+}
+
+/** Read back a tool-call block the model emitted, if it emitted one. */
+function parseTextToolCalls(content: string): ToolCall[] | null {
+  if (!content.includes(TOOL_SENTINEL)) return null;
+  const parsed = tryParse<Record<string, unknown>>(extractJson(content));
+  const raw = parsed?.[TOOL_SENTINEL];
+  if (!Array.isArray(raw)) return null;
+  const calls: ToolCall[] = [];
+  for (const [i, entry] of raw.entries()) {
+    const e = entry as { name?: unknown; input?: unknown };
+    if (typeof e?.name !== "string") continue;
+    calls.push({ id: `cli_${Date.now().toString(36)}_${i}`, name: e.name, input: e.input ?? {} });
+  }
+  return calls.length ? calls : null;
 }
 
 /**
@@ -119,7 +156,9 @@ export class CliProvider implements Provider {
   }
 
   async complete(req: CompletionRequest): Promise<CompletionResult> {
-    const prompt = flatten(req.messages, this.systemInPrompt);
+    // Tools the harness owns only reach an agentic CLI through the prompt.
+    const harnessTools = req.tools ?? [];
+    const prompt = flatten(req.messages, this.systemInPrompt) + (harnessTools.length ? toolManifest(harnessTools) : "");
     const reqArgs = this.requestArgs ? this.requestArgs(req) : [];
     const argv = [...this.args, ...this.extraArgs, ...reqArgs];
     const finalArgs = this.promptVia === "arg" ? [...argv, prompt] : argv;
@@ -128,23 +167,27 @@ export class CliProvider implements Provider {
     if (this.parseResult) {
       const r = this.parseResult(stdout);
       const content = r.content ?? "";
+      const textCalls = harnessTools.length && !r.toolCalls?.length ? parseTextToolCalls(content) : null;
+      const toolCalls = r.toolCalls?.length ? r.toolCalls : (textCalls ?? undefined);
       return {
         content,
-        toolCalls: r.toolCalls,
+        toolCalls,
         tokensIn: r.tokensIn ?? estimateTokens(req.messages),
         tokensOut: r.tokensOut ?? Math.ceil(content.length / 4),
-        stopReason: r.stopReason ?? "end",
+        stopReason: toolCalls?.length ? "tool_use" : (r.stopReason ?? "end"),
         sessionId: r.sessionId,
         costUsd: r.costUsd,
       };
     }
 
     const content = this.parse(stdout);
+    const toolCalls = harnessTools.length ? (parseTextToolCalls(content) ?? undefined) : undefined;
     return {
       content,
+      toolCalls,
       tokensIn: estimateTokens(req.messages),
       tokensOut: Math.ceil(content.length / 4),
-      stopReason: "end",
+      stopReason: toolCalls?.length ? "tool_use" : "end",
     };
   }
 }
