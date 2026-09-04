@@ -1,4 +1,7 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { OpenAICompatProvider, ollama, CliProvider, defineTool } from "../src/index.js";
 
 const realFetch = globalThis.fetch;
@@ -160,5 +163,85 @@ describe("CliProvider — harness tools over the text protocol", () => {
     const r = await chatty.complete({ messages: [{ role: "user", content: "audit" }], tools: [finding.schema] });
     expect(r.stopReason).toBe("end");
     expect(r.toolCalls).toBeUndefined();
+  });
+});
+
+describe("CliProvider — carrying the CLI's own session", () => {
+  // Without this every step is a cold start: the CLI re-reads the whole
+  // workspace, and nothing it learned in step 1 exists in step 2.
+  //
+  // The stub is a real script file rather than `node -e`, because node parses
+  // a bare `--resume` as one of its own options and refuses it.
+  let dir: string;
+  let script: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "omf-cli-"));
+    script = join(dir, "echo.mjs");
+    writeFileSync(
+      script,
+      'process.stdout.write(JSON.stringify({ result: process.argv.slice(2).join(" "), session_id: "sess-1" }))',
+      "utf8",
+    );
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const provider = (continueSession: boolean) =>
+    new CliProvider({
+      command: process.execPath,
+      args: [script],
+      promptVia: "arg",
+      continueSession,
+      parseResult: (out) => {
+        const j = JSON.parse(out) as { result: string; session_id: string };
+        return { content: j.result, sessionId: j.session_id };
+      },
+    });
+
+  it("resumes the session it was given on the next work call", async () => {
+    const p = provider(true);
+    const first = await p.complete({ messages: [{ role: "user", content: "one" }] });
+    expect(first.content).not.toContain("--resume");
+    const second = await p.complete({ messages: [{ role: "user", content: "two" }] });
+    expect(second.content).toContain("--resume sess-1");
+  });
+
+  it("keeps planning and reflection out of that session", async () => {
+    // A reflector that remembers doing the work is not an independent check of
+    // it. Those calls ask for JSON, so they stay cold.
+    const p = provider(true);
+    await p.complete({ messages: [{ role: "user", content: "work" }] });
+    const judged = await p.complete({ messages: [{ role: "user", content: "judge" }], responseFormat: "json" });
+    expect(judged.content).not.toContain("--resume");
+  });
+
+  it("does nothing unless asked", async () => {
+    const p = provider(false);
+    await p.complete({ messages: [{ role: "user", content: "one" }] });
+    const second = await p.complete({ messages: [{ role: "user", content: "two" }] });
+    expect(second.content).not.toContain("--resume");
+  });
+
+  it("falls back to a cold start when the CLI rejects the session", async () => {
+    // A session the CLI no longer knows about must not strand the run.
+    const picky = join(dir, "picky.mjs");
+    writeFileSync(
+      picky,
+      'if (process.argv.includes("--resume")) { process.stderr.write("unknown session"); process.exit(2); }' +
+        'process.stdout.write(JSON.stringify({ result: "cold:" + process.argv.slice(2).join(" "), session_id: "sess-1" }))',
+      "utf8",
+    );
+    const p = new CliProvider({
+      command: process.execPath,
+      args: [picky],
+      promptVia: "arg",
+      continueSession: true,
+      parseResult: (out) => {
+        const j = JSON.parse(out) as { result: string; session_id: string };
+        return { content: j.result, sessionId: j.session_id };
+      },
+    });
+    await p.complete({ messages: [{ role: "user", content: "one" }] });
+    const second = await p.complete({ messages: [{ role: "user", content: "two" }] });
+    expect(second.content).toBe("cold:two");
   });
 });
