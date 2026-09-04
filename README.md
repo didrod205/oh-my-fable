@@ -13,10 +13,36 @@
 [![license](https://img.shields.io/npm/l/oh-my-fable.svg)](./LICENSE)
 
 ```bash
-npm i oh-my-fable
+npx oh-my-fable demo
 ```
 
+**Watch a crash → resume in 10 seconds — no API key, no setup.**
+
 </div>
+
+## Already paying for Claude Code? Then this costs $0 per token
+
+```bash
+npx oh-my-fable run "refactor utils.ts and run the tests" --provider claude --cli-tools
+```
+
+Drives Claude Code as a **durable, tool-using agent** on the login you already have —
+**no separate API key, no per-token billing.** Claude edits the files and runs the
+commands itself; oh-my-fable stays the durable planner/reflector around it, checkpointing
+every step so `resume` always works. ([all the CLI options ↓](#or-use-it-from-the-terminal))
+
+## Symptom → what stops it
+
+| you have seen this | what stops it |
+| --- | --- |
+| The process dies at step 47 of 60 — and the agent starts over from zero. | [`RunContext` is checkpointed after every step; `resume()` continues at 47 →](#1-it-survives-crashes-resumable-by-construction) |
+| It loops on the same step forever, re-trying the same broken approach. | [`maxStepAttempts` marks that step `blocked` and forces a replan →](#it-cant-run-away) |
+| It loses the plan somewhere in a 40-message chat history. | [The plan is structured data that lives *outside* the conversation →](#2-it-plans-first-then-self-corrects-plan--history) |
+| The plan runs out of steps, so it declares victory with the goal unmet. | [A final exit check verifies `successCriteria` and sends it back to work →](#2-it-plans-first-then-self-corrects-plan--history) |
+| It runs away — burning tokens, hours, and money with no ceiling. | [Three hard ceilings plus two recovery caps; it halts cleanly, keeping all work →](#it-cant-run-away) |
+| You cannot test the agent loop, because every assertion needs a live model. | [`ScriptedProvider` makes the whole loop deterministic — no network →](#3-its-deterministically-testable-genuinely-rare-for-an-agent-framework) |
+
+## Why it exists
 
 The demos are magical. Then you point an agent at a *real* multi-hour task and it
 loops on the same step, loses the plan somewhere in a 40-message chat history, and
@@ -114,6 +140,10 @@ budget halts, the tool loop — all without a single API call.
 
 ## Quick start
 
+```bash
+npm i oh-my-fable        # zero runtime dependencies
+```
+
 ```ts
 import { run, AnthropicProvider } from "oh-my-fable";
 
@@ -128,10 +158,6 @@ const result = await run(
 
 console.log(result.status); // "done" | "halted" | "failed"
 console.log(result.ctx.plan.steps);
-```
-
-```bash
-npm i oh-my-fable        # zero runtime dependencies
 ```
 
 Node ≥ 18. Ships with `AnthropicProvider` and `OpenAICompatProvider` (works with
@@ -159,8 +185,7 @@ Don't want to write code? It ships a CLI (zero extra deps):
 ```bash
 npx oh-my-fable demo                       # watch crash → resume, no API key
 
-# ⭐ already pay for Claude Code? drive it as a DURABLE, TOOL-USING agent — your
-#    login, no separate API key, $0 per token. Claude edits files & runs commands:
+# ⭐ your Claude Code login — no API key, $0 per token, Claude uses its own tools:
 npx oh-my-fable run "refactor utils.ts and run the tests" --provider claude --cli-tools
 
 # pure-reasoning over the same login (no tools):
@@ -292,6 +317,14 @@ starting over:
 
 - ⭐ **Star the repo** — it's how the next person building an agent finds it.
 - 🍋 **[Sponsor via Lemon Squeezy](https://elab-studio.lemonsqueezy.com/checkout/buy/5d059b89-51d0-456b-b33a-ed56994f7010)** — one-time or recurring.
+
+## Not the Claude Code plugin of the same name
+
+There is a separate, unrelated project also called *oh-my-fable* — a prompting
+plugin for Claude Code. It shares no code with this one. **This** `oh-my-fable` is
+the npm package documented above: a TypeScript agent harness (`npm i oh-my-fable`,
+`npx oh-my-fable`) that plans, checkpoints, and resumes long-running agent runs.
+If you arrived here looking for the plugin, you want the other repository.
 
 ## License
 
