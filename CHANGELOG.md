@@ -4,6 +4,42 @@ All notable changes to oh-my-fable are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.4] — 2026-09-05
+
+Found by driving a real build through `--provider claude --cli-tools` — an agent
+writing a web service from scratch, 19 steps over an hour. Two of these stopped
+that build dead.
+
+### Fixed
+
+- **The wall-clock ceiling had no flag.** `--max-steps` and `--max-tokens` were
+  settable; the 30-minute default was not. An agentic CLI step takes minutes, so
+  anyone using `--cli-tools` hits it — the build halted at 8 of 19 steps and the
+  only way past was editing the checkpoint by hand. Added `--max-minutes`.
+- **A run halted on a budget could not be resumed.** `resume` honored the run's
+  persisted budgets, and a halted run is already past one of them, so it halted
+  again the instant it resumed — while the halt message told you to resume.
+  Budgets the caller names now replace the persisted ones; unnamed ones are left
+  alone, so a run's own limits still stand by default.
+- **The halt message names the flag that lifts the ceiling it hit**, instead of
+  pointing at a bare `resume` that cannot work:
+  `resume with: oh-my-fable resume run_x --max-steps 50`
+
+### Added
+
+- **`continueSession` for `CliProvider`.** The CLI reports a session id; the
+  harness captured it and threw it away, so every step was a cold start that
+  re-read the whole workspace. It can now carry that session between *work*
+  calls — planning and reflection deliberately stay out of it, since a reflector
+  that remembers doing the work is not a check on it. A session the CLI no
+  longer knows about falls back to a cold start rather than stranding the run.
+
+  **Off by default, and measured:** turning it on partway through that same
+  build cost 86% more tokens per step over the next four steps (931k → 1.73M)
+  and ran slower, because resuming re-sends a transcript that grows faster than
+  the cache saves. It may pay off on a session kept small from the first step;
+  that case is untested.
+
 ## [0.4.3] — 2026-09-04
 
 ### Fixed
@@ -275,6 +311,7 @@ fixed, with tests.
 - Zero runtime dependencies. 20 tests covering crash-resume, replan accumulation,
   self-correction, budgets, tools, and JSON defense.
 
+[0.4.4]: https://github.com/didrod205/oh-my-fable/releases/tag/v0.4.4
 [0.4.3]: https://github.com/didrod205/oh-my-fable/releases/tag/v0.4.3
 [0.4.2]: https://github.com/didrod205/oh-my-fable/releases/tag/v0.4.2
 [0.4.1]: https://github.com/didrod205/oh-my-fable/releases/tag/v0.4.1
