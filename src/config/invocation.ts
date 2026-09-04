@@ -34,6 +34,27 @@ export function withRemembered(ctx: RunContext, flags: FlagBag): FlagBag {
   return merged;
 }
 
+/**
+ * The flags that grant an agent hands. Restoring these from a checkpoint is the
+ * point of remembering an invocation — but the checkpoint is an ordinary file
+ * in the user's runs directory, so anyone who can write there decides what a
+ * later `resume` executes and under which permission mode. That should never
+ * happen quietly.
+ */
+const PERMISSION_FLAGS = ["cli-tools", "allow", "permission-mode"] as const;
+
+/** Which agent-shaping flags this resume took from the checkpoint rather than the command line. */
+export function restoredFrom(ctx: RunContext, flags: FlagBag): string[] {
+  const saved = (ctx.meta["cli"] ?? {}) as Invocation;
+  return INVOCATION_FLAGS.filter((k) => flags[k] === undefined && saved[k] !== undefined);
+}
+
+/** Of those, the ones that hand the agent tools or loosen approvals. */
+export function restoredPermissions(ctx: RunContext, flags: FlagBag): string[] {
+  const restored = new Set(restoredFrom(ctx, flags));
+  return PERMISSION_FLAGS.filter((k) => restored.has(k));
+}
+
 /** One-line "who am I resuming as", so a restored provider is never invisible. */
 export function describeInvocation(inv: Invocation): string {
   const bits: string[] = [];

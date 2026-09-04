@@ -10,7 +10,7 @@ import { OpenAICompatProvider, ollama } from "./providers/openai.js";
 import { claudeCode, codexCli } from "./providers/cli.js";
 import { ScriptedProvider, reply } from "./providers/provider.js";
 import type { RunEvent, Goal, RunConfig, Provider } from "./core/types.js";
-import { invocationOf, withRemembered, describeInvocation, positiveFlag, type Invocation } from "./config/invocation.js";
+import { invocationOf, withRemembered, describeInvocation, restoredPermissions, positiveFlag, type Invocation } from "./config/invocation.js";
 
 /** `positiveFlag`, reported the way the CLI reports every other usage error. */
 function budget(v: string | boolean | undefined, name: string): number | undefined {
@@ -193,11 +193,20 @@ async function cmdResume(args: Args): Promise<void> {
   if (!ctx) fail(`No saved run found for "${runId}".   (see \`oh-my-fable list\`)`);
   // Resume as the SAME agent: the provider and tools the run started with are
   // read back from the checkpoint. Flags typed now override them.
+  const granted = restoredPermissions(ctx, args.flags);
   const flags = withRemembered(ctx, args.flags);
   const provider = makeProvider(flags);
   ctx.meta["cli"] = invocationOf(flags); // remember any override for the next resume
   const as = describeInvocation(ctx.meta["cli"] as Invocation);
-  process.stdout.write(`\n  ${dim("resuming")} ${mag(runId)}${as ? dim(`  (${as})`) : ""}\n\n`);
+  process.stdout.write(`\n  ${dim("resuming")} ${mag(runId)}${as ? dim(`  (${as})`) : ""}\n`);
+  // Tool access restored from a file on disk, not from this command line: say so.
+  if (granted.length) {
+    process.stdout.write(
+      `  ${yellow("!")} ${dim(`tool access (${granted.map((g) => "--" + g).join(", ")}) came from the checkpoint, not this command`)}\n` +
+        `    ${dim(`re-run with the flags you want to pin them, or inspect ${runsDirOf(args.flags)}/${runId}.json`)}\n`,
+    );
+  }
+  process.stdout.write("\n");
   const result = await runWith(ctx, { ...commonConfig(flags, provider), store });
   process.stdout.write(`\n  ${bold(result.status === "done" ? green("finished") : yellow(result.status))}\n\n`);
   process.exit(result.status === "done" ? 0 : 1);

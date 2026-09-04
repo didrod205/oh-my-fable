@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileStore, createContext, resolveSerializable } from "../src/index.js";
-import { invocationOf, withRemembered, describeInvocation, positiveFlag } from "../src/config/invocation.js";
+import { invocationOf, withRemembered, describeInvocation, positiveFlag, restoredPermissions } from "../src/config/invocation.js";
 import type { RunContext } from "../src/core/types.js";
 
 const ctxWith = (cli?: unknown): RunContext => {
@@ -77,5 +77,24 @@ describe("budget flags", () => {
     expect(positiveFlag("50", "max-steps")).toBe(50);
     expect(positiveFlag("2000000", "max-tokens")).toBe(2_000_000);
     expect(positiveFlag(undefined, "max-steps")).toBeUndefined();
+  });
+});
+
+describe("tool access restored from a checkpoint", () => {
+  // The checkpoint is an ordinary file in the user's runs directory. Restoring
+  // the agent from it is the point — but whoever can write there decides what a
+  // later resume runs and under which permission mode, so it must not be quiet.
+  it("names the permission flags that came from the file", () => {
+    const ctx = ctxWith({ provider: "claude", "cli-tools": true, "permission-mode": "dontAsk" });
+    expect(restoredPermissions(ctx, {})).toEqual(["cli-tools", "permission-mode"]);
+  });
+
+  it("stays quiet when the operator typed those flags themselves", () => {
+    const ctx = ctxWith({ provider: "claude", "cli-tools": true, "permission-mode": "dontAsk" });
+    expect(restoredPermissions(ctx, { "cli-tools": true, "permission-mode": "acceptEdits" })).toEqual([]);
+  });
+
+  it("does not flag a restored provider that grants nothing", () => {
+    expect(restoredPermissions(ctxWith({ provider: "ollama", model: "llama3.1" }), {})).toEqual([]);
   });
 });
