@@ -9,6 +9,7 @@ import { OpenAICompatProvider, ollama } from "./providers/openai.js";
 import { claudeCode, codexCli } from "./providers/cli.js";
 import { ScriptedProvider, reply } from "./providers/provider.js";
 import type { RunEvent, Goal, RunConfig, Provider } from "./core/types.js";
+import { invocationOf, withRemembered, describeInvocation, type Invocation } from "./config/invocation.js";
 
 const VERSION = "0.4.0";
 
@@ -138,13 +139,21 @@ async function cmdRun(args: Args): Promise<void> {
   const provider = makeProvider(args.flags);
   const config = commonConfig(args.flags, provider);
   const ctx = createContext(goal, resolveSerializable(config));
+  ctx.meta["cli"] = invocationOf(args.flags); // so `resume` can rebuild this same agent
   process.stdout.write(`\n  ${dim("run")} ${mag(ctx.runId)}  ${dim(args.flags["tools"] === "fs" ? "(fs tools on)" : "(no tools — pure reasoning)")}\n\n`);
   try {
     const result = await runWith(ctx, config);
     process.stdout.write(`\n  ${bold(result.status === "done" ? green("finished") : yellow(result.status))}  ${dim(`· ${result.ctx.budget.steps} steps · resume with:`)} ${cyan(`oh-my-fable resume ${ctx.runId}`)}\n\n`);
     process.exit(result.status === "done" ? 0 : 1);
   } catch (err) {
-    process.stdout.write(`\n  ${red("crashed")} ${dim("— " + (err as Error).message)}\n  ${dim("resume from the last checkpoint:")} ${cyan(`oh-my-fable resume ${ctx.runId}`)}\n\n`);
+    // Only point at `resume` if there is actually something to resume from: a
+    // run that died before its first checkpoint (bad flag, missing CLI, no key)
+    // has nothing on disk, and sending the user there is a dead end.
+    const checkpointed = config.store ? await config.store.load(ctx.runId).catch(() => null) : null;
+    const next = checkpointed
+      ? `\n  ${dim("resume from the last checkpoint:")} ${cyan(`oh-my-fable resume ${ctx.runId}`)}`
+      : `\n  ${dim("nothing was checkpointed yet — fix the above and run it again.")}`;
+    process.stdout.write(`\n  ${red("crashed")} ${dim("— " + (err as Error).message)}${next}\n\n`);
     process.exit(1);
   }
 }
@@ -152,9 +161,17 @@ async function cmdRun(args: Args): Promise<void> {
 async function cmdResume(args: Args): Promise<void> {
   const runId = args._[0];
   if (!runId) fail("Give a run id: oh-my-fable resume <runId>   (see `oh-my-fable list`)");
-  const provider = makeProvider(args.flags);
-  process.stdout.write(`\n  ${dim("resuming")} ${mag(runId)}\n\n`);
-  const result = await resume(runId, commonConfig(args.flags, provider));
+  const store = new FileStore(typeof args.flags["runs-dir"] === "string" ? (args.flags["runs-dir"] as string) : "runs");
+  const ctx = await store.load(runId);
+  if (!ctx) fail(`No saved run found for "${runId}".   (see \`oh-my-fable list\`)`);
+  // Resume as the SAME agent: the provider and tools the run started with are
+  // read back from the checkpoint. Flags typed now override them.
+  const flags = withRemembered(ctx, args.flags);
+  const provider = makeProvider(flags);
+  ctx.meta["cli"] = invocationOf(flags); // remember any override for the next resume
+  const as = describeInvocation(ctx.meta["cli"] as Invocation);
+  process.stdout.write(`\n  ${dim("resuming")} ${mag(runId)}${as ? dim(`  (${as})`) : ""}\n\n`);
+  const result = await runWith(ctx, { ...commonConfig(flags, provider), store });
   process.stdout.write(`\n  ${bold(result.status === "done" ? green("finished") : yellow(result.status))}\n\n`);
   process.exit(result.status === "done" ? 0 : 1);
 }
