@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileStore, createContext, resolveSerializable } from "../src/index.js";
-import { invocationOf, withRemembered, describeInvocation, positiveFlag, restoredPermissions } from "../src/config/invocation.js";
+import { invocationOf, withRemembered, describeInvocation, positiveFlag, restoredPermissions, handsLabel } from "../src/config/invocation.js";
 import type { RunContext } from "../src/core/types.js";
 
 const ctxWith = (cli?: unknown): RunContext => {
@@ -96,5 +96,19 @@ describe("tool access restored from a checkpoint", () => {
 
   it("does not flag a restored provider that grants nothing", () => {
     expect(restoredPermissions(ctxWith({ provider: "ollama", model: "llama3.1" }), {})).toEqual([]);
+  });
+});
+
+describe("what the run says the agent can touch", () => {
+  it("never claims pure reasoning while the CLI holds its own tools", () => {
+    expect(handsLabel({ "cli-tools": true })).toBe("(the CLI runs its own tools — acceptEdits)");
+    expect(handsLabel({ "cli-tools": true, "permission-mode": "dontAsk" })).toBe("(the CLI runs its own tools — dontAsk)");
+    expect(handsLabel({ allow: "Read,Edit" })).toMatch(/runs its own tools/);
+  });
+
+  it("still distinguishes harness tools from no tools at all", () => {
+    expect(handsLabel({ tools: "fs" })).toBe("(fs tools on)");
+    expect(handsLabel({})).toBe("(no tools — pure reasoning)");
+    expect(handsLabel({ provider: "ollama" })).toBe("(no tools — pure reasoning)");
   });
 });

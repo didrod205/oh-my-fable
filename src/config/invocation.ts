@@ -79,3 +79,17 @@ export function positiveFlag(v: string | boolean | undefined, name: string): num
   if (!Number.isFinite(n) || n <= 0) throw new Error(`--${name} needs a positive number, got "${String(v)}".`);
   return n;
 }
+
+/**
+ * What the agent can actually touch, for the line printed at the start of a run.
+ * Saying "no tools — pure reasoning" while Claude edits files on its own
+ * permissions is the one thing this line must never do.
+ */
+export function handsLabel(flags: FlagBag): string {
+  if (flags["cli-tools"] === true || typeof flags["allow"] === "string") {
+    const mode = typeof flags["permission-mode"] === "string" ? flags["permission-mode"] : "acceptEdits";
+    return `(the CLI runs its own tools — ${mode})`;
+  }
+  if (flags["tools"] === "fs") return "(fs tools on)";
+  return "(no tools — pure reasoning)";
+}
