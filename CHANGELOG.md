@@ -4,6 +4,35 @@ All notable changes to oh-my-fable are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] — 2026-09-04
+
+### Fixed
+
+- **The harness's tools now reach an agentic CLI.** `CliProvider` never looked
+  at `req.tools`, so `run(goal, { provider: claudeCode(), tools: [...] })` ran
+  to completion having called nothing — the model was never told the tools
+  existed, invented a workaround, and the run reported `done` with no work done.
+  The README's Tools section shows exactly that call shape. Tools now travel in
+  the prompt and come back as real `ToolCall`s, driven by the existing tool loop.
+- **A truncated answer no longer throws away the calls that were complete.** A
+  step capped by `maxStepTokens` can be cut mid-object, which left the whole
+  block unparseable; every intact call went out with it. Complete objects are
+  now salvaged, and prose that merely mentions a tool is still not read as a call.
+- **`--provider claude` finds the desktop app's binary.** Claude Code installed
+  as the desktop app never puts `claude` on PATH, so people paying for it were
+  told it was "not installed". Resolution is now explicit → `OMF_CLAUDE_BIN` →
+  `CLAUDE_CODE_EXECPATH` → `claude`, and the error says how to fix it.
+- **A non-numeric budget flag stops the run instead of removing the ceiling.**
+  `--max-steps abc` became `NaN`, every `used >= NaN` is false, and the runaway
+  guard silently stopped existing.
+- **`--allow` no longer widens access on codex.** `codex exec` has no per-tool
+  allowlist, and the flag was mapped to "tools on" — a restrictive list became
+  `--sandbox workspace-write --ask-for-approval never`. It is now refused there.
+- **`resume` says when tool access came from the checkpoint** rather than from
+  the command line, since that file decides what a later resume spawns.
+- **The run header no longer calls a `--cli-tools` run "pure reasoning"** while
+  the CLI edits files on its own permissions.
+
 ## [0.4.1] — 2026-09-04
 
 ### Fixed
@@ -214,6 +243,7 @@ fixed, with tests.
 - Zero runtime dependencies. 20 tests covering crash-resume, replan accumulation,
   self-correction, budgets, tools, and JSON defense.
 
+[0.4.2]: https://github.com/didrod205/oh-my-fable/releases/tag/v0.4.2
 [0.4.1]: https://github.com/didrod205/oh-my-fable/releases/tag/v0.4.1
 [0.4.0]: https://github.com/didrod205/oh-my-fable/releases/tag/v0.4.0
 [0.3.0]: https://github.com/didrod205/oh-my-fable/releases/tag/v0.3.0
