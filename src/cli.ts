@@ -112,7 +112,9 @@ function makeProvider(flags: Args["flags"]): Provider {
   const cliTools = flags["cli-tools"] === true;
   const toolsOpt = allowList ?? (cliTools ? true : undefined);
   try {
-    if (provider === "claude" || provider === "claude-code") return claudeCode({ model, tools: toolsOpt, permissionMode });
+    if (provider === "claude" || provider === "claude-code") {
+      return claudeCode({ model, tools: toolsOpt, permissionMode, continueSession: flags["continue-session"] === true });
+    }
     if (provider === "codex") {
       // `codex exec` has no per-tool allowlist — only a sandbox and an approval
       // policy. Treating --allow as "tools on" turned a request to NARROW access
@@ -141,6 +143,19 @@ function makeProvider(flags: Args["flags"]): Provider {
   }
 }
 
+/**
+ * A run halted on a budget is already past that ceiling, so a bare `resume`
+ * halts again immediately. Name the flag that lifts the one it actually hit.
+ */
+function resumeHint(runId: string, reason?: string): string {
+  const base = `oh-my-fable resume ${runId}`;
+  if (!reason) return base;
+  if (reason.includes("wall-clock")) return `${base} --max-minutes 120`;
+  if (reason.includes("token budget")) return `${base} --max-tokens 20000000`;
+  if (reason.includes("step budget")) return `${base} --max-steps 50`;
+  return base;
+}
+
 /** Where checkpoints live — `--runs-dir`, or `runs/` beside the caller. */
 function runsDirOf(flags: Args["flags"]): string {
   return typeof flags["runs-dir"] === "string" ? (flags["runs-dir"] as string) : "runs";
@@ -155,6 +170,7 @@ function commonConfig(flags: Args["flags"], provider: Provider): RunConfig {
     onEvent: flags["quiet"] ? undefined : renderer(),
     maxSteps: budget(flags["max-steps"], "max-steps"),
     maxTokens: budget(flags["max-tokens"], "max-tokens"),
+    maxWallClockMs: budget(flags["max-minutes"], "max-minutes") ? budget(flags["max-minutes"], "max-minutes")! * 60_000 : undefined,
   };
 }
 
@@ -177,7 +193,8 @@ async function cmdRun(args: Args): Promise<void> {
   process.stdout.write("\n");
   try {
     const result = await runWith(ctx, config);
-    process.stdout.write(`\n  ${bold(result.status === "done" ? green("finished") : yellow(result.status))}  ${dim(`· ${result.ctx.budget.steps} steps · resume with:`)} ${cyan(`oh-my-fable resume ${ctx.runId}`)}\n\n`);
+    const how = resumeHint(ctx.runId, result.reason);
+    process.stdout.write(`\n  ${bold(result.status === "done" ? green("finished") : yellow(result.status))}  ${dim(`· ${result.ctx.budget.steps} steps · resume with:`)} ${cyan(how)}\n\n`);
     process.exit(result.status === "done" ? 0 : 1);
   } catch (err) {
     // Only point at `resume` if there is actually something to resume from: a
@@ -338,9 +355,13 @@ ${bold("Options for run")}
   --cli-tools           let a CLI provider run its own tools (claude/codex); pairs with --permission-mode
   --permission-mode <m> claude: acceptEdits (default) | dontAsk | plan
   --allow "Read,Edit"   claude: exact tool allowlist instead of the file-only default
+  --continue-session    claude: keep the CLI's session between steps, so it stops
+                        re-reading the whole workspace every time
   --success "a; b"      success criteria (semicolon-separated)
   --tools fs            give the harness sandboxed read_file/write_file/list_dir (API providers)
   --max-steps <n>       step budget          --max-tokens <n>   token budget
+  --max-minutes <n>     active runtime budget (default 30; a --cli-tools step
+                        takes minutes, so raise this for agentic CLI runs)
   --runs-dir <dir>      where checkpoints live (default: runs/)
   --quiet               no live event stream
 

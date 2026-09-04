@@ -51,6 +51,12 @@ export async function run(goal: Goal | string, config: RunConfig): Promise<RunRe
   return runLoop(ctx, buildDeps(config, ctx));
 }
 
+/**
+ * Budgets a caller named explicitly, so they can lift a ceiling a halted run is
+ * already sitting on. Everything unnamed keeps whatever the run recorded.
+ */
+const BUDGET_KEYS = ["maxSteps", "maxTokens", "maxWallClockMs", "maxStepAttempts", "maxReplans"] as const;
+
 /** Resume a run from its last checkpoint — same plan, same progress, continues where it died. */
 export async function resume(runId: string, config: RunConfig): Promise<RunResult> {
   const store = config.store ?? new FileStore(config.runsDir);
@@ -60,7 +66,13 @@ export async function resume(runId: string, config: RunConfig): Promise<RunResul
   // against the wall-clock budget. Active time survives in budget.elapsedMs.
   ctx.budget.elapsedMs ??= 0;
   ctx.budget.startedAtMs = Date.now();
-  // Honor the run's own persisted budgets/limits; only the live deps come from `config`.
+  // The run's own budgets stand, except where the caller names a new one. A run
+  // halted on a budget is already past that ceiling, so without this it halts
+  // again the instant it resumes — while the halt message tells you to resume.
+  for (const k of BUDGET_KEYS) {
+    const raised = config[k];
+    if (typeof raised === "number" && Number.isFinite(raised)) ctx.config[k] = raised;
+  }
   return runLoop(ctx, buildDeps({ ...config, store }, ctx));
 }
 

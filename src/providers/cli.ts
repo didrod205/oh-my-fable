@@ -19,6 +19,12 @@ export interface CliProviderOptions {
   extraArgs?: string[];
   /** Per-request flags computed from the request (e.g. --output-format, --append-system-prompt). */
   requestArgs?: (req: CompletionRequest) => string[];
+  /**
+   * Carry the CLI's own session from one call to the next, so it does not
+   * re-discover the workspace every step. Only the calls where the CLI is doing
+   * work are continued — see {@link CliProvider.complete}.
+   */
+  continueSession?: boolean;
   /** Structured stdout parser — takes precedence over `parse`; can return usage/session/cost. */
   parseResult?: (stdout: string) => Partial<CompletionResult>;
   /** Convey system messages inside the prompt (default) or out-of-band via `requestArgs`. */
@@ -194,6 +200,9 @@ export class CliProvider implements Provider {
   private readonly requestArgs?: (req: CompletionRequest) => string[];
   private readonly parseResult?: (stdout: string) => Partial<CompletionResult>;
   private readonly systemInPrompt: boolean;
+  private readonly continueSession: boolean;
+  /** The CLI session to continue, once the CLI has told us one exists. */
+  private sessionId?: string;
 
   constructor(opts: CliProviderOptions) {
     this.command = opts.command;
@@ -210,6 +219,7 @@ export class CliProvider implements Provider {
     this.requestArgs = opts.requestArgs;
     this.parseResult = opts.parseResult;
     this.systemInPrompt = opts.systemInPrompt ?? true;
+    this.continueSession = opts.continueSession ?? false;
   }
 
   estimateTokens(messages: Message[]): number {
@@ -222,11 +232,31 @@ export class CliProvider implements Provider {
     const prompt = flatten(req.messages, this.systemInPrompt) + (harnessTools.length ? toolManifest(harnessTools) : "");
     const reqArgs = this.requestArgs ? this.requestArgs(req) : [];
     const argv = [...this.args, ...this.extraArgs, ...reqArgs];
-    const finalArgs = this.promptVia === "arg" ? [...argv, prompt] : argv;
-    const stdout = await runCli(this.command, finalArgs, this.promptVia === "stdin" ? prompt : null, this.timeoutMs, this.env);
+
+    // Continue the CLI's session for work calls only. Planning and reflection
+    // must not inherit the executor's conversation: a reflector that remembers
+    // doing the work is not an independent check of it, and the exit check
+    // least of all. Those are the calls that ask for JSON, so they stay fresh.
+    const isWorkCall = req.responseFormat !== "json";
+    const resuming = this.continueSession && isWorkCall && this.sessionId ? this.sessionId : undefined;
+    const withSession = resuming ? [...argv, "--resume", resuming] : argv;
+    const finalArgs = this.promptVia === "arg" ? [...withSession, prompt] : withSession;
+
+    let stdout: string;
+    try {
+      stdout = await runCli(this.command, finalArgs, this.promptVia === "stdin" ? prompt : null, this.timeoutMs, this.env);
+    } catch (err) {
+      // A session the CLI no longer knows about must not strand the run: drop it
+      // and take the cold start we were trying to avoid.
+      if (!resuming) throw err;
+      this.sessionId = undefined;
+      const cold = this.promptVia === "arg" ? [...argv, prompt] : argv;
+      stdout = await runCli(this.command, cold, this.promptVia === "stdin" ? prompt : null, this.timeoutMs, this.env);
+    }
 
     if (this.parseResult) {
       const r = this.parseResult(stdout);
+      if (this.continueSession && isWorkCall && r.sessionId) this.sessionId = r.sessionId;
       const content = r.content ?? "";
       const textCalls = harnessTools.length && !r.toolCalls?.length ? parseTextToolCalls(content) : null;
       const toolCalls = r.toolCalls?.length ? r.toolCalls : (textCalls ?? undefined);
@@ -332,6 +362,20 @@ export interface ClaudeCodeOptions {
   /** Continue a prior `claude` session id (`--resume`) — preserves its context + cache. */
   resumeSessionId?: string;
   /**
+   * Keep the CLI's own session across steps instead of starting cold each time.
+   * Applies to work calls only; planning and reflection stay independent, since
+   * a reflector that remembers doing the work is not a check on it.
+   *
+   * Measure before trusting it. Resuming means every later turn re-sends the
+   * accumulated transcript, and that can grow faster than the cache saves.
+   * Turning it on partway through a long build — at step 11, inheriting the
+   * largest session there had been — cost 86% more tokens per step over the
+   * next four steps (931k → 1.73M) and ran slower. It may still pay off on a
+   * session kept small from the first step; that case is untested. Off by
+   * default for this reason.
+   */
+  continueSession?: boolean;
+  /**
    * Path to the `claude` binary. Defaults to whatever resolution order
    * {@link resolveClaudeCommand} uses — needed when Claude Code is installed as
    * the desktop app, whose binary lives inside the .app bundle and is not on PATH.
@@ -370,6 +414,7 @@ export function claudeCode(opts: ClaudeCodeOptions = {}): CliProvider {
   return new CliProvider({
     command: resolveClaudeCommand(opts.command),
     args: ["-p"],
+    continueSession: opts.continueSession,
     promptVia: "arg",
     label: "claude-code",
     timeoutMs: opts.timeoutMs,

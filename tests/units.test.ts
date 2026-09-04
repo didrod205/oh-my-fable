@@ -12,6 +12,7 @@ import {
   nextPendingStep,
   checkBudget,
   reply,
+  resume,
 } from "../src/index.js";
 import type { RunContext, Observation } from "../src/index.js";
 import { extractJson, tryParse } from "../src/core/json.js";
@@ -143,6 +144,45 @@ describe("FileStore round-trips RunContext", () => {
       expect((await store.load(ctx.runId))!.runId).toBe(ctx.runId);
     } finally {
       rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("a budget halt can be lifted on resume", () => {
+  it("takes a raised ceiling from the caller and keeps the rest", async () => {
+    // Without this a run halted on a budget halts again the instant it resumes,
+    // while the halt message tells you to resume — the ceiling it is sitting on
+    // is the one thing you cannot change.
+    const dir = mkdtempSync(join(tmpdir(), "af-"));
+    try {
+      const store = new FileStore(dir);
+      const ctx = createContext({ description: "g" }, resolveSerializable({ maxSteps: 4, maxTokens: 1000 }));
+      ctx.plan.steps = [{ id: "s1", intent: "x", status: "done", attempts: 1, result: "ok" }];
+      ctx.budget.tokens = 5000; // already past the token ceiling
+      await store.save(ctx);
+
+      const provider = new ScriptedProvider([reply.reflection("goal_met")]);
+      const r = await resume(ctx.runId, { provider, store, maxTokens: 9_000_000 });
+      expect(r.ctx.config.maxTokens).toBe(9_000_000);
+      expect(r.ctx.config.maxSteps).toBe(4); // untouched
+      expect(r.status).not.toBe("halted");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves every budget alone when the caller names none", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "af-"));
+    try {
+      const store = new FileStore(dir);
+      const ctx = createContext({ description: "g" }, resolveSerializable({ maxSteps: 7, maxTokens: 1234 }));
+      await store.save(ctx);
+      const provider = new ScriptedProvider([reply.plan([{ id: "s1", intent: "x" }]), reply.text("ok"), reply.reflection("goal_met")]);
+      const r = await resume(ctx.runId, { provider, store });
+      expect(r.ctx.config.maxSteps).toBe(7);
+      expect(r.ctx.config.maxTokens).toBe(1234);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
