@@ -12,7 +12,7 @@ import { ScriptedProvider, reply } from "./providers/provider.js";
 import type { RunEvent, Goal, RunConfig, Provider } from "./core/types.js";
 import { invocationOf, withRemembered, describeInvocation, type Invocation } from "./config/invocation.js";
 
-const VERSION = "0.4.0";
+const VERSION = "0.4.1";
 
 // ── tiny zero-dep arg + color helpers ────────────────────────────────────────
 const useColor = process.stdout.isTTY && !process.env["NO_COLOR"];
