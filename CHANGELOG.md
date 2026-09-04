@@ -22,6 +22,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that dies before its first checkpoint (missing CLI, bad flag, no API key) now
   says so instead of suggesting `oh-my-fable resume <runId>`, which could only
   answer "No saved run found".
+- **`list` shows timestamps on your own clock.** It printed the stored ISO
+  string, which is UTC, with nothing to say so — a run started at 15:01 local
+  was listed as `06:01`.
+
+### Changed
+
+- **The `runs/` directory the store creates now ignores itself.** A checkpoint
+  carries the run's whole history, including whatever the tools read out of
+  your files; running an agent inside a repo used to leave that sitting in
+  `git status`. A directory the store creates gets a `.gitignore` containing
+  `*`, and the CLI says where checkpoints went on the run that creates it. A
+  directory you made yourself is never touched.
 
 ## [0.4.0] — 2026-07-08
 
