@@ -1,6 +1,6 @@
 {
   "name": "oh-my-fable",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "description": "Durable, resumable agent harness for TypeScript — a crash is a pause. The whole run lives in one serializable RunContext, checkpointed after every step, so resume() continues exactly where the process died. Plans first, self-corrects every step, halts before it runs away. Model-agnostic, zero dependencies, deterministically testable.",
   "type": "module",
   "main": "./dist/index.js",
@@ -67,7 +67,7 @@
   "bugs": {
     "url": "https://github.com/didrod205/oh-my-fable/issues"
   },
-  "homepage": "https://github.com/didrod205/oh-my-fable#readme",
+  "homepage": "https://elab-studio.com/open-source/oh-my-fable",
   "devDependencies": {
     "@types/node": "^22.10.0",
     "tsup": "^8.3.5",

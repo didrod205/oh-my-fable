@@ -4,6 +4,16 @@ All notable changes to oh-my-fable are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.5] — 2026-09-17
+
+### Changed
+
+- **`homepage` now points to the project page** at
+  https://elab-studio.com/open-source/oh-my-fable instead of the GitHub README, so the
+  "Homepage" link on npm lands on a page that explains what the harness is for.
+
+No code changes. The published files are the same as 0.4.4 apart from the version string.
+
 ## [0.4.4] — 2026-09-05
 
 Found by driving a real build through `--provider claude --cli-tools` — an agent
