@@ -3,6 +3,8 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Manual run: checks the npm trusted publisher link without publishing.
+  workflow_dispatch:
 
 jobs:
   publish:
@@ -15,11 +17,55 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           registry-url: https://registry.npmjs.org
           cache: npm
-      - run: npm ci
-      - run: npm test
-      - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # Trusted publishing (OIDC) needs npm 11.5 or newer.
+      - run: npm install --global --ignore-scripts npm@^11
+
+      - name: Check trusted publisher
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          id_token=$(curl -sSf -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=npm:registry.npmjs.org" | jq -r .value)
+          status=$(curl -sS -o exchange.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $id_token" \
+            https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/oh-my-fable)
+          if [ "$status" = 200 ]; then
+            echo "npm accepts this workflow as a trusted publisher."
+          else
+            echo "::error::npm refused the OIDC exchange ($status): $(jq -r '.message // .error // .' exchange.json)"
+            exit 1
+          fi
+          rm -f exchange.json
+
+      - name: Tag matches package.json
+        if: github.event_name == 'push'
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json $version"
+            exit 1
+          fi
+
+      - if: github.event_name == 'push'
+        run: npm ci
+      - if: github.event_name == 'push'
+        run: npm test
+
+      # A version already published by hand is not a failure.
+      - name: Already on npm?
+        id: check
+        if: github.event_name == 'push'
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if npm view "oh-my-fable@$version" version >/dev/null 2>&1; then
+            echo "::notice::$version is already on npm; skipping publish."
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # No token: npm authenticates this run through OIDC.
+      - if: github.event_name == 'push' && steps.check.outputs.published == 'false'
+        run: npm publish --provenance --access public
